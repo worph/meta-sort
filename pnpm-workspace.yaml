@@ -1,0 +1,6 @@
+packages:
+  - 'packages/shared/*'
+  - 'packages/async-utils'
+  - 'packages/meta-sort-core'
+  - 'packages/meta-sort-ui'
+  - 'packages/meta-sort-editor'

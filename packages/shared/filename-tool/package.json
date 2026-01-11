@@ -1,0 +1,45 @@
+{
+  "name": "@metazla/filename-tools",
+  "version": "1.0.0",
+  "description": "module that extract metadata from a given filename",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "dist/index.d.ts": [
+        "dist/index.d.ts"
+      ],
+      "*": [
+        "dist/*"
+      ]
+    }
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc && tsup",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.2",
+    "cross-env": "^7.0.3",
+    "ts-node": "^10.9.2",
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.3",
+    "vitest": "^1.4.0"
+  },
+  "dependencies": {
+    "file-type": "^19.0.0",
+    "franc": "^6.2.0",
+    "franc-all": "^7.2.0",
+    "iso-639-1": "^3.1.2",
+    "iso-639-3": "^3.0.1"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "name": "@metazla/meta-hash",
+  "version": "1.0.0",
+  "description": "module that hash (cid) files and uses cache",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "dist/index.d.ts": [
+        "dist/index.d.ts"
+      ],
+      "*": [
+        "dist/*"
+      ]
+    }
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./index-interface": {
+      "import": "./dist/index-interface.js",
+      "require": "./dist/index-interface.cjs"
+    },
+    "./index-browser": {
+      "import": "./dist/index-browser.js",
+      "require": "./dist/index-browser.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@libp2p/crypto": "^4.0.5",
+    "@types/node": "^20.12.2",
+    "ts-node": "^10.9.2",
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.3",
+    "vitest": "^1.4.0"
+  },
+  "dependencies": {
+    "bencodec": "^2.0.1",
+    "chokidar": "^3.6.0",
+    "crc-32": "^1.2.2",
+    "csv-parse": "^5.5.5",
+    "csv-stringify": "^6.4.6",
+    "debounce": "^2.0.0",
+    "hash-wasm": "^4.12.0",
+    "multiformats": "^13.1.0",
+    "p-queue": "^8.0.1",
+    "piscina": "^4.4.0"
+  }
+}

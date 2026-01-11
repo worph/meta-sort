@@ -1,0 +1,10 @@
+TODO:
+Jellyfin nfo format (only for video)
+    - nfo to metadata (this is used as lib)
+    - metadata to nfo
+    - create or update nfo
+
+meta yml to nfo
+    - nfo to metadata (this is used as lib)
+    - metadata to nfo
+    - create or update nfo

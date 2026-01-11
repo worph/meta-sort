@@ -1,0 +1,16 @@
+{
+  "name": "meta-sort",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone file sorting and metadata extraction service",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "start": "pnpm --filter @meta-sort/core start",
+    "start:core": "pnpm --filter @meta-sort/core start",
+    "start:ui": "pnpm --filter @meta-sort/ui dev",
+    "test": "pnpm --filter @meta-sort/core test",
+    "lint": "pnpm -r lint"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,30 @@
+{
+    "compilerOptions": {
+      "noImplicitAny": false,
+      "outDir": "build/",
+      "module": "esnext",
+      "target": "esnext",
+      "allowJs": true,
+      "sourceMap": true,
+      "declaration": true,
+      "esModuleInterop":true,
+      "skipLibCheck": true,
+      "emitDeclarationOnly": true,
+      "moduleResolution": "node",
+      "baseUrl": "./",
+      "paths": {
+        "@root/*": ["src/lib/*"]
+      },
+      "plugins": [
+        {
+          //used to replace the alias by relative path
+          "transform": "typescript-transform-paths",
+          "afterDeclarations": true
+        }
+      ]
+    },
+    "include": [
+      "src/lib"
+    ],
+    "exclude": ["node_modules/**"]
+}

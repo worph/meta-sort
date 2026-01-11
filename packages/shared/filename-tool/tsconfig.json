@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "noImplicitAny": false,
+    "module": "NodeNext",
+    "target": "ESNext",
+    "allowJs": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationDir": "./dist",
+    "emitDeclarationOnly": true,
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist",
+    "rootDir": "./src/lib",
+    "baseUrl": "./"
+  },
+  "include": [
+    "src/lib"
+  ],
+  "exclude": ["node_modules/**"]
+}
