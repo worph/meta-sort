@@ -130,8 +130,8 @@ RUN chmod -R 755 /app/editor
 COPY --from=backend-builder /build/packages/meta-sort-core/dist /app/backend/dist
 COPY --from=backend-builder /build/packages/meta-sort-core/package.json /app/backend/
 
-# Copy plugins directory
-COPY --from=backend-builder /build/packages/meta-sort-core/plugins /app/backend/plugins
+# Copy plugins directory (plugins are now external container plugins)
+# COPY --from=backend-builder /build/packages/meta-sort-core/plugins /app/backend/plugins
 
 # Copy node_modules (has all deps including workspace packages)
 COPY --from=backend-builder /build/node_modules /app/node_modules

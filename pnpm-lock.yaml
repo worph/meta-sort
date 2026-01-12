@@ -8,88 +8,6 @@ importers:
 
   .: {}
 
-  ../meta-hash:
-    dependencies:
-      bencodec:
-        specifier: ^2.0.1
-        version: 2.4.3
-      chokidar:
-        specifier: ^3.6.0
-        version: 3.6.0
-      crc-32:
-        specifier: ^1.2.2
-        version: 1.2.2
-      csv-parse:
-        specifier: ^5.5.5
-        version: 5.6.0
-      csv-stringify:
-        specifier: ^6.4.6
-        version: 6.6.0
-      debounce:
-        specifier: ^2.0.0
-        version: 2.2.0
-      hash-wasm:
-        specifier: ^4.12.0
-        version: 4.12.0
-      multiformats:
-        specifier: ^13.1.0
-        version: 13.4.2
-      p-queue:
-        specifier: ^8.0.1
-        version: 8.1.1
-      piscina:
-        specifier: ^4.4.0
-        version: 4.9.2
-    devDependencies:
-      '@libp2p/crypto':
-        specifier: ^4.0.5
-        version: 4.1.9
-      '@types/node':
-        specifier: ^20.12.2
-        version: 20.19.27
-      ts-node:
-        specifier: ^10.9.2
-        version: 10.9.2(@types/node@20.19.27)(typescript@5.9.3)
-      tsup:
-        specifier: ^8.0.2
-        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
-      typescript:
-        specifier: ^5.4.3
-        version: 5.9.3
-      vitest:
-        specifier: ^1.4.0
-        version: 1.6.1(@types/node@20.19.27)
-
-  ../meta-interface:
-    devDependencies:
-      '@types/chai':
-        specifier: ^4.3.11
-        version: 4.3.20
-      '@types/mocha':
-        specifier: ^10.0.6
-        version: 10.0.10
-      '@types/node':
-        specifier: ^20.12.2
-        version: 20.19.27
-      chai:
-        specifier: ^5.0.3
-        version: 5.3.3
-      cross-env:
-        specifier: ^7.0.3
-        version: 7.0.3
-      mocha:
-        specifier: ^10.2.0
-        version: 10.8.2
-      ts-node:
-        specifier: ^10.9.2
-        version: 10.9.2(@types/node@20.19.27)(typescript@5.9.3)
-      tsup:
-        specifier: ^8.0.2
-        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
-      typescript:
-        specifier: ^5.4.3
-        version: 5.9.3
-
   packages/async-utils:
     devDependencies:
       '@types/jest':
@@ -114,14 +32,14 @@ importers:
         specifier: ^8.3.0
         version: 8.3.0
       '@metazla/filename-tools':
-        specifier: github:worph/filename-tool
-        version: https://codeload.github.com/worph/filename-tool/tar.gz/8a12f1b59bdbf97185f79f5b140cd363ddb614d6
+        specifier: workspace:*
+        version: link:../shared/filename-tool
       '@metazla/meta-hash':
         specifier: workspace:*
-        version: link:../../../meta-hash
+        version: link:../shared/meta-hash
       '@metazla/meta-interface':
         specifier: workspace:*
-        version: link:../../../meta-interface
+        version: link:../shared/meta-interface
       '@worph/async-utils':
         specifier: workspace:*
         version: link:../async-utils
@@ -263,6 +181,125 @@ importers:
       vite:
         specifier: ^5.0.12
         version: 5.4.21(@types/node@20.19.27)
+
+  packages/shared/filename-tool:
+    dependencies:
+      file-type:
+        specifier: ^19.0.0
+        version: 19.6.0
+      franc:
+        specifier: ^6.2.0
+        version: 6.2.0
+      franc-all:
+        specifier: ^7.2.0
+        version: 7.2.0
+      iso-639-1:
+        specifier: ^3.1.2
+        version: 3.1.5
+      iso-639-3:
+        specifier: ^3.0.1
+        version: 3.0.1
+    devDependencies:
+      '@types/node':
+        specifier: ^20.12.2
+        version: 20.19.27
+      cross-env:
+        specifier: ^7.0.3
+        version: 7.0.3
+      ts-node:
+        specifier: ^10.9.2
+        version: 10.9.2(@types/node@20.19.27)(typescript@5.9.3)
+      tsup:
+        specifier: ^8.0.2
+        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
+      typescript:
+        specifier: ^5.4.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.4.0
+        version: 1.6.1(@types/node@20.19.27)
+
+  packages/shared/meta-hash:
+    dependencies:
+      bencodec:
+        specifier: ^2.0.1
+        version: 2.4.3
+      chokidar:
+        specifier: ^3.6.0
+        version: 3.6.0
+      crc-32:
+        specifier: ^1.2.2
+        version: 1.2.2
+      csv-parse:
+        specifier: ^5.5.5
+        version: 5.6.0
+      csv-stringify:
+        specifier: ^6.4.6
+        version: 6.6.0
+      debounce:
+        specifier: ^2.0.0
+        version: 2.2.0
+      hash-wasm:
+        specifier: ^4.12.0
+        version: 4.12.0
+      multiformats:
+        specifier: ^13.1.0
+        version: 13.4.2
+      p-queue:
+        specifier: ^8.0.1
+        version: 8.1.1
+      piscina:
+        specifier: ^4.4.0
+        version: 4.9.2
+    devDependencies:
+      '@libp2p/crypto':
+        specifier: ^4.0.5
+        version: 4.1.9
+      '@types/node':
+        specifier: ^20.12.2
+        version: 20.19.27
+      ts-node:
+        specifier: ^10.9.2
+        version: 10.9.2(@types/node@20.19.27)(typescript@5.9.3)
+      tsup:
+        specifier: ^8.0.2
+        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
+      typescript:
+        specifier: ^5.4.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.4.0
+        version: 1.6.1(@types/node@20.19.27)
+
+  packages/shared/meta-interface:
+    devDependencies:
+      '@types/chai':
+        specifier: ^4.3.11
+        version: 4.3.20
+      '@types/mocha':
+        specifier: ^10.0.6
+        version: 10.0.10
+      '@types/node':
+        specifier: ^20.12.2
+        version: 20.19.27
+      chai:
+        specifier: ^5.0.3
+        version: 5.3.3
+      cross-env:
+        specifier: ^7.0.3
+        version: 7.0.3
+      mocha:
+        specifier: ^10.2.0
+        version: 10.8.2
+      ts-node:
+        specifier: ^10.9.2
+        version: 10.9.2(@types/node@20.19.27)(typescript@5.9.3)
+      tsup:
+        specifier: ^8.0.2
+        version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
+      typescript:
+        specifier: ^5.4.3
+        version: 5.9.3
 
 packages:
 
@@ -1052,10 +1089,6 @@ packages:
   '@lukeed/ms@2.0.2':
     resolution: {integrity: sha512-9I2Zn6+NJLfaGoz9jN3lpwDgAYvfGeNYdbAIjJOqzs4Tpc+VU3Jqq4IofSUBKajiDS8k9fZIg18/z13mpk1bsA==}
     engines: {node: '>=8'}
-
-  '@metazla/filename-tools@https://codeload.github.com/worph/filename-tool/tar.gz/8a12f1b59bdbf97185f79f5b140cd363ddb614d6':
-    resolution: {tarball: https://codeload.github.com/worph/filename-tool/tar.gz/8a12f1b59bdbf97185f79f5b140cd363ddb614d6}
-    version: 1.0.0
 
   '@multiformats/dns@1.0.11':
     resolution: {integrity: sha512-KnT4gX71zas8br5OO2mArwBgRqTx78FvK193VL8/bP8T1ydDuWUilevZlPug9Azufos+ioHd8pHAVY3v7U41tQ==}
@@ -4325,14 +4358,6 @@ snapshots:
       uint8arraylist: 2.4.8
 
   '@lukeed/ms@2.0.2': {}
-
-  '@metazla/filename-tools@https://codeload.github.com/worph/filename-tool/tar.gz/8a12f1b59bdbf97185f79f5b140cd363ddb614d6':
-    dependencies:
-      file-type: 19.6.0
-      franc: 6.2.0
-      franc-all: 7.2.0
-      iso-639-1: 3.1.5
-      iso-639-3: 3.0.1
 
   '@multiformats/dns@1.0.11':
     dependencies:
