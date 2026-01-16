@@ -577,6 +577,43 @@ export class ContainerPluginScheduler extends EventEmitter {
     /**
      * Pause queues
      */
+    /**
+     * Get currently running tasks (status === 'dispatched')
+     * Returns array of { taskId, pluginId, fileHash, filePath, queue, startTime }
+     */
+    getRunningTasks(): Array<{
+        taskId: string;
+        pluginId: string;
+        fileHash: string;
+        filePath: string;
+        queue: TaskQueueType;
+        startTime?: number;
+    }> {
+        const running: Array<{
+            taskId: string;
+            pluginId: string;
+            fileHash: string;
+            filePath: string;
+            queue: TaskQueueType;
+            startTime?: number;
+        }> = [];
+
+        for (const [taskId, task] of this.pendingTasks) {
+            if (task.status === 'dispatched') {
+                running.push({
+                    taskId,
+                    pluginId: task.pluginId,
+                    fileHash: task.fileHash,
+                    filePath: task.filePath,
+                    queue: task.queue,
+                    startTime: task.dispatchedAt,
+                });
+            }
+        }
+
+        return running;
+    }
+
     pause(): void {
         this.fastQueue.pause();
         this.backgroundQueue.pause();

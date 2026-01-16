@@ -2,7 +2,7 @@
  * Shared type definitions for meta-sort-ui
  */
 
-export type FileState = 'pending' | 'lightProcessing' | 'hashProcessing' | 'done';
+export type FileState = 'discovered' | 'lightProcessing' | 'hashProcessing' | 'done';
 
 export interface FileStateInfo {
     filePath: string;
@@ -75,14 +75,21 @@ export interface TaskSchedulerQueueStatus {
 }
 
 export interface ProcessingStatus {
-    pending: FileStateInfo[];
+    discovered: FileStateInfo[];
     lightProcessing: FileStateInfo[];
     hashProcessing: FileStateInfo[];
     done: FileStateInfo[];
-    totalPending: number;
+    /** Files waiting for fast queue (validated but not yet processing) */
+    totalDiscovered: number;
     totalLightProcessing: number;
     totalHashProcessing: number;
     totalDone: number;
+    /** Total number of failed files */
+    totalFailed?: number;
+    /** @deprecated Use totalDiscovered instead. Kept for backward compatibility. */
+    awaitingFastQueue: number;
+    /** Files that completed fast queue but are waiting for background queue */
+    awaitingBackground: number;
     watchedFolders: string[];
     fastQueueConcurrency?: number;
     backgroundQueueConcurrency?: number;
@@ -91,6 +98,19 @@ export interface ProcessingStatus {
     queueStatus?: TaskSchedulerQueueStatus;
     // New concurrency config
     preProcessConcurrency?: number;
+}
+
+export interface FailedFile {
+    filePath: string;
+    reason: string;
+    timestamp: number;
+    retryCount: number;
+    stage: 'metadata' | 'hash' | 'processing';
+}
+
+export interface FailedFilesResponse {
+    failedFiles: FailedFile[];
+    totalFailed: number;
 }
 
 export interface HashTimingStats {

@@ -4,7 +4,8 @@ import {
     Metrics,
     RedisStats,
     QueueItem,
-    HashTimingStats
+    HashTimingStats,
+    FailedFile
 } from '../types';
 import {
     formatMs,
@@ -19,14 +20,16 @@ function Monitor() {
     const [metrics, setMetrics] = useState<Metrics | null>(null);
     const [redisStats, setRedisStats] = useState<RedisStats | null>(null);
     const [queue, setQueue] = useState<QueueItem[]>([]);
+    const [failedFiles, setFailedFiles] = useState<FailedFile[]>([]);
 
     const fetchData = useCallback(async () => {
         try {
-            const [statusRes, metricsRes, queueRes, statsRes] = await Promise.all([
+            const [statusRes, metricsRes, queueRes, statsRes, failedRes] = await Promise.all([
                 fetch('/api/processing/status'),
                 fetch('/api/metrics'),
                 fetch('/api/processing/queue'),
-                fetch('/api/stats')
+                fetch('/api/stats'),
+                fetch('/api/processing/failed')
             ]);
 
             if (statusRes.ok) setStatus(await statusRes.json());
@@ -36,6 +39,10 @@ function Monitor() {
                 setQueue(queueData.items || []);
             }
             if (statsRes.ok) setRedisStats(await statsRes.json());
+            if (failedRes.ok) {
+                const failedData = await failedRes.json();
+                setFailedFiles(failedData.failedFiles || []);
+            }
         } catch (err) {
             console.error('Failed to fetch data:', err);
         }
@@ -56,26 +63,52 @@ function Monitor() {
         }
     };
 
-    // Calculate progress for 5-stage pipeline
+    const retryFile = async (filePath: string) => {
+        try {
+            await fetch('/api/processing/retry', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filePath })
+            });
+            fetchData();
+        } catch (err) {
+            console.error('Failed to retry file:', err);
+        }
+    };
+
+    const retryAllFailed = async () => {
+        try {
+            await fetch('/api/processing/retry-all', { method: 'POST' });
+            fetchData();
+        } catch (err) {
+            console.error('Failed to retry all files:', err);
+        }
+    };
+
+    // Calculate progress for 6-stage pipeline (including failed)
+    // Discovered = files waiting for fast queue (validated but not yet processing)
     const getProgress = () => {
-        if (!status) return { pending: 0, preProcess: 0, fast: 0, background: 0, done: 0, total: 0 };
+        if (!status) return { discovered: 0, fast: 0, awaitingBackground: 0, background: 0, done: 0, failed: 0, total: 0 };
 
         const computed = status.computed;
-        const preProcessCount = computed?.preProcessRunning || 0;
-        const fastCount = (computed?.fastQueueRunning || 0) + (computed?.fastQueuePending || 0);
-        const backgroundCount = (computed?.backgroundQueueRunning || 0) + (computed?.backgroundQueuePending || 0);
+        const discoveredCount = status.totalDiscovered || 0; // Files waiting for fast queue
+        const fastRunningCount = computed?.fastQueueRunning || 0;
+        const awaitingBackgroundCount = status.awaitingBackground || 0;
+        const backgroundRunningCount = computed?.backgroundQueueRunning || 0;
+        const failedCount = status.totalFailed || 0;
 
-        // Total = pending + all processing stages + done
-        const total = status.totalPending + preProcessCount + fastCount + backgroundCount + status.totalDone;
+        // Total = discovered + fast running + awaiting bg + bg running + done + failed
+        const total = discoveredCount + fastRunningCount + awaitingBackgroundCount + backgroundRunningCount + status.totalDone + failedCount;
 
-        if (total === 0) return { pending: 0, preProcess: 0, fast: 0, background: 0, done: 100, total: 0 };
+        if (total === 0) return { discovered: 0, fast: 0, awaitingBackground: 0, background: 0, done: 100, failed: 0, total: 0 };
 
         return {
-            pending: (status.totalPending / total) * 100,
-            preProcess: (preProcessCount / total) * 100,
-            fast: (fastCount / total) * 100,
-            background: (backgroundCount / total) * 100,
+            discovered: (discoveredCount / total) * 100,
+            fast: (fastRunningCount / total) * 100,
+            awaitingBackground: (awaitingBackgroundCount / total) * 100,
+            background: (backgroundRunningCount / total) * 100,
             done: (status.totalDone / total) * 100,
+            failed: (failedCount / total) * 100,
             total
         };
     };
@@ -128,32 +161,25 @@ function Monitor() {
                 </button>
             </div>
 
-            {/* Pipeline Progress Bar - 5 Stage */}
+            {/* Pipeline Progress Bar - 6 Stage (including failed) */}
             {status && (
                 <div className="card pipeline-section">
                     <h2>Processing Pipeline</h2>
                     <div className="pipeline-bar-container">
                         <div className="pipeline-bar">
-                            <div className="bar-segment pending" style={{ width: `${progress.pending}%` }} />
-                            <div className="bar-segment preprocess" style={{ width: `${progress.preProcess}%` }} />
+                            <div className="bar-segment discovered" style={{ width: `${progress.discovered}%` }} />
                             <div className="bar-segment fast" style={{ width: `${progress.fast}%` }} />
+                            <div className="bar-segment awaiting-background" style={{ width: `${progress.awaitingBackground}%` }} />
                             <div className="bar-segment background" style={{ width: `${progress.background}%` }} />
                             <div className="bar-segment done" style={{ width: `${progress.done}%` }} />
+                            <div className="bar-segment failed" style={{ width: `${progress.failed}%` }} />
                         </div>
                     </div>
                     <div className="pipeline-stats">
-                        <div className="pipeline-stat pending">
+                        <div className="pipeline-stat discovered">
                             <span className="stat-dot"></span>
-                            <span className="stat-label">Pending</span>
-                            <span className="stat-value">{formatNumber(status.totalPending)}</span>
-                        </div>
-                        <div className="pipeline-stat preprocess">
-                            <span className="stat-dot"></span>
-                            <span className="stat-label">Validation</span>
-                            <span className="stat-value">
-                                {queueStats.preProcess.running}/{queueStats.preProcess.max}
-                            </span>
-                            {queueStats.preProcess.paused && <span className="paused-indicator">paused</span>}
+                            <span className="stat-label">Discovered</span>
+                            <span className="stat-value">{formatNumber(status.totalDiscovered)}</span>
                         </div>
                         <div className="pipeline-stat fast">
                             <span className="stat-dot"></span>
@@ -163,9 +189,14 @@ function Monitor() {
                             </span>
                             {queueStats.fast.paused && <span className="paused-indicator">paused</span>}
                         </div>
+                        <div className="pipeline-stat awaiting-background">
+                            <span className="stat-dot"></span>
+                            <span className="stat-label">Awaiting BG</span>
+                            <span className="stat-value">{formatNumber(status.awaitingBackground || 0)}</span>
+                        </div>
                         <div className="pipeline-stat background">
                             <span className="stat-dot"></span>
-                            <span className="stat-label">Background Queue</span>
+                            <span className="stat-label">Background</span>
                             <span className="stat-value">
                                 {queueStats.background.running}/{queueStats.background.max}
                             </span>
@@ -176,11 +207,19 @@ function Monitor() {
                             <span className="stat-label">Complete</span>
                             <span className="stat-value">{formatNumber(status.totalDone)}</span>
                         </div>
+                        {(status.totalFailed || 0) > 0 && (
+                            <div className="pipeline-stat failed">
+                                <span className="stat-dot"></span>
+                                <span className="stat-label">Failed</span>
+                                <span className="stat-value">{formatNumber(status.totalFailed || 0)}</span>
+                            </div>
+                        )}
                     </div>
                     {progress.total > 0 && (
                         <div className="pipeline-summary">
                             {formatNumber(progress.total)} total files |{' '}
                             {((status.totalDone / progress.total) * 100).toFixed(1)}% complete
+                            {(status.totalFailed || 0) > 0 && ` | ${status.totalFailed} failed`}
                         </div>
                     )}
                 </div>
@@ -189,41 +228,6 @@ function Monitor() {
             {/* Queue Status Cards - StreamingPipeline stages */}
             {status && (
                 <div className="queue-cards">
-                    <div className="queue-card preprocess">
-                        <div className="queue-card-header">
-                            <span className="queue-icon">✓</span>
-                            <span className="queue-name">Validation</span>
-                        </div>
-                        <div className="queue-card-body">
-                            <div className="queue-stat">
-                                <span className="queue-stat-label">Running</span>
-                                <span className="queue-stat-value">{queueStats.preProcess.running}/{queueStats.preProcess.max}</span>
-                            </div>
-                            <div className="queue-stat">
-                                <span className="queue-stat-label">Pending</span>
-                                <span className="queue-stat-value">{queueStats.preProcess.pending}</span>
-                            </div>
-                            <div className="queue-progress-bar">
-                                <div
-                                    className="queue-progress-fill"
-                                    style={{ width: `${(queueStats.preProcess.running / queueStats.preProcess.max) * 100}%` }}
-                                />
-                            </div>
-                            <div className="queue-status">
-                                {queueStats.preProcess.paused ? (
-                                    <span className="status-paused">⏸ Paused</span>
-                                ) : queueStats.preProcess.running > 0 ? (
-                                    <span className="status-running">▶ Running</span>
-                                ) : (
-                                    <span className="status-idle">● Idle</span>
-                                )}
-                            </div>
-                        </div>
-                        <div className="queue-card-footer">
-                            <span className="queue-description">Extension checks</span>
-                        </div>
-                    </div>
-
                     <div className="queue-card fast">
                         <div className="queue-card-header">
                             <span className="queue-icon">⚡</span>
@@ -253,9 +257,6 @@ function Monitor() {
                                     <span className="status-idle">● Idle</span>
                                 )}
                             </div>
-                        </div>
-                        <div className="queue-card-footer">
-                            <span className="queue-description">MidHash + FFmpeg + Plugins</span>
                         </div>
                     </div>
 
@@ -288,9 +289,6 @@ function Monitor() {
                                     <span className="status-idle">● Idle</span>
                                 )}
                             </div>
-                        </div>
-                        <div className="queue-card-footer">
-                            <span className="queue-description">SHA-256 full file hash</span>
                         </div>
                     </div>
                 </div>
@@ -457,6 +455,47 @@ function Monitor() {
                 )}
             </div>
 
+            {/* Failed Files */}
+            {failedFiles.length > 0 && (
+                <div className="card failed-files-section">
+                    <div className="card-header-with-action">
+                        <h2>Failed Files ({failedFiles.length})</h2>
+                        <button className="btn btn-small btn-warning" onClick={retryAllFailed}>
+                            Retry All
+                        </button>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>File</th>
+                                <th>Reason</th>
+                                <th>Retries</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {failedFiles.slice(0, 100).map((file, i) => (
+                                <tr key={i}>
+                                    <td className="file-path" title={file.filePath}>{getFilename(file.filePath)}</td>
+                                    <td className="error-reason" title={file.reason}>
+                                        {file.reason.length > 50 ? file.reason.substring(0, 50) + '...' : file.reason}
+                                    </td>
+                                    <td>{file.retryCount}</td>
+                                    <td>
+                                        <button
+                                            className="btn btn-small btn-retry"
+                                            onClick={() => retryFile(file.filePath)}
+                                        >
+                                            Retry
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+
             {/* Watched Folders */}
             {status && status.watchedFolders && (
                 <div className="card">
@@ -510,7 +549,7 @@ function Monitor() {
                     transition: width 0.3s ease;
                 }
 
-                .bar-segment.pending {
+                .bar-segment.discovered {
                     background: linear-gradient(90deg, #6b7280, #9ca3af);
                 }
 
@@ -518,8 +557,16 @@ function Monitor() {
                     background: linear-gradient(90deg, #3b82f6, #60a5fa);
                 }
 
+                .bar-segment.awaiting-fast {
+                    background: linear-gradient(90deg, #06b6d4, #22d3ee);
+                }
+
                 .bar-segment.fast {
                     background: linear-gradient(90deg, #f59e0b, #fbbf24);
+                }
+
+                .bar-segment.awaiting-background {
+                    background: linear-gradient(90deg, #ec4899, #f472b6);
                 }
 
                 .bar-segment.background {
@@ -528,6 +575,10 @@ function Monitor() {
 
                 .bar-segment.done {
                     background: linear-gradient(90deg, #10b981, #34d399);
+                }
+
+                .bar-segment.failed {
+                    background: linear-gradient(90deg, #ef4444, #f87171);
                 }
 
                 .pipeline-stats {
@@ -549,11 +600,14 @@ function Monitor() {
                     border-radius: 50%;
                 }
 
-                .pipeline-stat.pending .stat-dot { background: #9ca3af; }
+                .pipeline-stat.discovered .stat-dot { background: #9ca3af; }
                 .pipeline-stat.preprocess .stat-dot { background: #60a5fa; }
+                .pipeline-stat.awaiting-fast .stat-dot { background: #22d3ee; }
                 .pipeline-stat.fast .stat-dot { background: #fbbf24; }
+                .pipeline-stat.awaiting-background .stat-dot { background: #f472b6; }
                 .pipeline-stat.background .stat-dot { background: #a78bfa; }
                 .pipeline-stat.done .stat-dot { background: #34d399; }
+                .pipeline-stat.failed .stat-dot { background: #f87171; }
 
                 .pipeline-stat .stat-label {
                     color: var(--text-secondary);
@@ -565,11 +619,14 @@ function Monitor() {
                     font-size: 1.1rem;
                 }
 
-                .pipeline-stat.pending .stat-value { color: #9ca3af; }
+                .pipeline-stat.discovered .stat-value { color: #9ca3af; }
                 .pipeline-stat.preprocess .stat-value { color: #60a5fa; }
+                .pipeline-stat.awaiting-fast .stat-value { color: #22d3ee; }
                 .pipeline-stat.fast .stat-value { color: #fbbf24; }
+                .pipeline-stat.awaiting-background .stat-value { color: #f472b6; }
                 .pipeline-stat.background .stat-value { color: #a78bfa; }
                 .pipeline-stat.done .stat-value { color: #34d399; }
+                .pipeline-stat.failed .stat-value { color: #f87171; }
 
                 .paused-indicator {
                     font-size: 0.75rem;
@@ -589,7 +646,7 @@ function Monitor() {
                 /* Queue Status Cards */
                 .queue-cards {
                     display: grid;
-                    grid-template-columns: repeat(3, 1fr);
+                    grid-template-columns: repeat(2, 1fr);
                     gap: 16px;
                     margin-bottom: 24px;
                 }
@@ -941,6 +998,11 @@ function Monitor() {
                     color: #a78bfa;
                 }
 
+                .stage-plugin {
+                    background: rgba(6, 182, 212, 0.15);
+                    color: #22d3ee;
+                }
+
                 .plugin-badge {
                     display: inline-block;
                     margin-left: 8px;
@@ -971,6 +1033,44 @@ function Monitor() {
                     border-radius: 6px;
                     margin-bottom: 8px;
                     font-family: monospace;
+                }
+
+                /* Failed Files Section */
+                .failed-files-section {
+                    border-left: 4px solid #ef4444;
+                }
+
+                .failed-files-section h2 {
+                    color: #f87171;
+                }
+
+                .error-reason {
+                    color: #f87171;
+                    font-size: 0.85rem;
+                    max-width: 300px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .btn-warning {
+                    background: linear-gradient(135deg, #f59e0b, #d97706);
+                    color: white;
+                }
+
+                .btn-warning:hover {
+                    background: linear-gradient(135deg, #d97706, #b45309);
+                }
+
+                .btn-retry {
+                    background: linear-gradient(135deg, #3b82f6, #2563eb);
+                    color: white;
+                    padding: 4px 8px;
+                    font-size: 0.75rem;
+                }
+
+                .btn-retry:hover {
+                    background: linear-gradient(135deg, #2563eb, #1d4ed8);
                 }
             `}</style>
         </div>

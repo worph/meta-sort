@@ -222,6 +222,9 @@ export class UnifiedAPIServer {
 
     // File download routes (under /api/file)
     this.setupFileRoutes();
+
+    // Mount management routes (under /api/mounts)
+    this.setupMountRoutes();
   }
 
   /**
@@ -276,6 +279,338 @@ export class UnifiedAPIServer {
         });
       }
     });
+  }
+
+  /**
+   * Setup Mount Management API routes
+   * Manages NFS, SMB, and rclone remote storage mounts
+   */
+  private setupMountRoutes(): void {
+    const MOUNTS_DIR = `${config.META_CORE_PATH}/mounts`;
+    const MOUNTS_FILE = `${MOUNTS_DIR}/mounts.json`;
+    const ERRORS_DIR = `${MOUNTS_DIR}/errors`;
+    const FILES_PATH = config.FILES_PATH;
+
+    // Helper: ensure directories exist
+    const ensureDirs = async () => {
+      const fs = await import('fs/promises');
+      await fs.mkdir(MOUNTS_DIR, { recursive: true });
+      await fs.mkdir(ERRORS_DIR, { recursive: true });
+    };
+
+    // Helper: sanitize name for filesystem
+    const sanitizeName = (name: string): string => {
+      return name
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 64);
+    };
+
+    // Helper: read mounts config
+    const readMountsConfig = async (): Promise<{ version: number; mounts: any[] }> => {
+      const fs = await import('fs/promises');
+      try {
+        const data = await fs.readFile(MOUNTS_FILE, 'utf-8');
+        return JSON.parse(data);
+      } catch (e: any) {
+        if (e.code === 'ENOENT') {
+          return { version: 1, mounts: [] };
+        }
+        throw e;
+      }
+    };
+
+    // Helper: write mounts config
+    const writeMountsConfig = async (mountsConfig: { version: number; mounts: any[] }) => {
+      const fs = await import('fs/promises');
+      await ensureDirs();
+      await fs.writeFile(MOUNTS_FILE, JSON.stringify(mountsConfig, null, 2));
+    };
+
+    // Helper: check if path is mounted
+    const isMounted = (mountPath: string): boolean => {
+      try {
+        const output = execSync(`findmnt -n "${mountPath}" 2>/dev/null || true`, {
+          encoding: 'utf-8',
+          timeout: 5000 // 5 second timeout to prevent hanging on slow mounts
+        });
+        return output.trim().length > 0;
+      } catch {
+        return false;
+      }
+    };
+
+    // Helper: read error for mount
+    const readError = async (id: string): Promise<string | undefined> => {
+      const fs = await import('fs/promises');
+      try {
+        const errorFile = `${ERRORS_DIR}/${id}.error`;
+        const content = await fs.readFile(errorFile, 'utf-8');
+        const lines = content.trim().split('\n');
+        return lines.slice(1).join('\n'); // Skip timestamp line
+      } catch {
+        return undefined;
+      }
+    };
+
+    // GET /api/mounts - List all mounts with status
+    this.app.get('/api/mounts', async (request, reply) => {
+      try {
+        await ensureDirs();
+        const mountsConfig = await readMountsConfig();
+
+        const mounts = await Promise.all(mountsConfig.mounts.map(async (mount: any) => {
+          const mounted = isMounted(mount.mountPath);
+          const error = await readError(mount.id);
+          return {
+            ...mount,
+            mounted,
+            error,
+            lastChecked: Date.now()
+          };
+        }));
+
+        return { mounts };
+      } catch (error: any) {
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    // GET /api/mounts/rclone/remotes - List available rclone remotes
+    this.app.get('/api/mounts/rclone/remotes', async (request, reply) => {
+      try {
+        const response = await fetch('http://127.0.0.1:5572/config/listremotes', {
+          headers: {
+            'Authorization': 'Basic ' + Buffer.from('admin:admin').toString('base64')
+          }
+        });
+
+        if (!response.ok) {
+          return { remotes: [] };
+        }
+
+        const data = await response.json() as { remotes?: string[] };
+        const remoteNames = data.remotes || [];
+
+        // Get type for each remote
+        const remotes = await Promise.all(remoteNames.map(async (name: string) => {
+          try {
+            const typeRes = await fetch('http://127.0.0.1:5572/config/get', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Basic ' + Buffer.from('admin:admin').toString('base64')
+              },
+              body: JSON.stringify({ name: name.replace(/:$/, '') })
+            });
+            const typeData = await typeRes.json() as { type?: string };
+            return {
+              name: name.replace(/:$/, ''),
+              type: typeData.type || 'unknown'
+            };
+          } catch {
+            return { name: name.replace(/:$/, ''), type: 'unknown' };
+          }
+        }));
+
+        return { remotes };
+      } catch (error: any) {
+        return { remotes: [] };
+      }
+    });
+
+    // POST /api/mounts - Create new mount
+    interface CreateMountBody {
+      name?: string;
+      type?: 'nfs' | 'smb' | 'rclone';
+      enabled?: boolean;
+      nfsServer?: string;
+      nfsPath?: string;
+      smbServer?: string;
+      smbShare?: string;
+      smbUsername?: string;
+      smbPassword?: string;
+      smbDomain?: string;
+      rcloneRemote?: string;
+      rclonePath?: string;
+    }
+
+    this.app.post<{ Body: CreateMountBody }>('/api/mounts', async (request, reply) => {
+      const { randomUUID } = await import('crypto');
+      const fs = await import('fs/promises');
+
+      try {
+        await ensureDirs();
+        const body = request.body;
+
+        if (!body.name) {
+          return reply.status(400).send({ error: 'Mount name is required' });
+        }
+
+        if (!body.type || !['nfs', 'smb', 'rclone'].includes(body.type)) {
+          return reply.status(400).send({ error: 'Valid mount type (nfs, smb, rclone) is required' });
+        }
+
+        const id = randomUUID();
+        const safeName = sanitizeName(body.name);
+        const mountPath = `${FILES_PATH}/${safeName}`;
+
+        // Check if mount path already exists in config
+        const existingConfig = await readMountsConfig();
+        const pathExists = existingConfig.mounts.some((m: any) => m.mountPath === mountPath);
+        if (pathExists) {
+          return reply.status(400).send({ error: `Mount path ${mountPath} already configured` });
+        }
+
+        const mount: Record<string, any> = {
+          id,
+          name: body.name,
+          type: body.type,
+          enabled: body.enabled !== false,
+          desiredMounted: body.enabled !== false, // Auto-mount if enabled
+          mountPath
+        };
+
+        // Type-specific fields
+        if (body.type === 'nfs') {
+          if (!body.nfsServer || !body.nfsPath) {
+            return reply.status(400).send({ error: 'NFS server and path are required' });
+          }
+          mount.nfsServer = body.nfsServer;
+          mount.nfsPath = body.nfsPath;
+        } else if (body.type === 'smb') {
+          if (!body.smbServer || !body.smbShare) {
+            return reply.status(400).send({ error: 'SMB server and share are required' });
+          }
+          mount.smbServer = body.smbServer;
+          mount.smbShare = body.smbShare;
+
+          // Store credentials - password is obscured using rclone
+          if (body.smbUsername) {
+            mount.smbUsername = body.smbUsername;
+          }
+          if (body.smbPassword) {
+            try {
+              // Obscure password using rclone (prevents plaintext storage)
+              const obscured = execSync(`rclone obscure "${body.smbPassword.replace(/"/g, '\\"')}"`, {
+                encoding: 'utf-8',
+                timeout: 5000
+              }).trim();
+              mount.smbPasswordObscured = obscured;
+            } catch (err) {
+              console.error('[Mounts] Failed to obscure password:', err);
+              return reply.status(500).send({ error: 'Failed to secure password' });
+            }
+          }
+          if (body.smbDomain) {
+            mount.smbDomain = body.smbDomain;
+          }
+        } else if (body.type === 'rclone') {
+          if (!body.rcloneRemote) {
+            return reply.status(400).send({ error: 'rclone remote is required' });
+          }
+          mount.rcloneRemote = body.rcloneRemote;
+          mount.rclonePath = body.rclonePath || '';
+        }
+
+        existingConfig.mounts.push(mount);
+        await writeMountsConfig(existingConfig);
+
+        console.log(`[Mounts] Created mount config: ${mount.name} (${mount.type}) -> ${mount.mountPath}`);
+        return { mount };
+      } catch (error: any) {
+        console.error('[Mounts] Error creating mount:', error);
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    // POST /api/mounts/:id/mount - Request mount
+    this.app.post<{ Params: { id: string } }>('/api/mounts/:id/mount', async (request, reply) => {
+      try {
+        const mountsConfig = await readMountsConfig();
+        const mount = mountsConfig.mounts.find((m: any) => m.id === request.params.id);
+
+        if (!mount) {
+          return reply.status(404).send({ error: 'Mount not found' });
+        }
+
+        mount.desiredMounted = true;
+        await writeMountsConfig(mountsConfig);
+
+        console.log(`[Mounts] Mount requested: ${mount.name}`);
+        return { status: 'ok', message: 'Mount requested' };
+      } catch (error: any) {
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    // POST /api/mounts/:id/unmount - Request unmount
+    this.app.post<{ Params: { id: string } }>('/api/mounts/:id/unmount', async (request, reply) => {
+      try {
+        const mountsConfig = await readMountsConfig();
+        const mount = mountsConfig.mounts.find((m: any) => m.id === request.params.id);
+
+        if (!mount) {
+          return reply.status(404).send({ error: 'Mount not found' });
+        }
+
+        mount.desiredMounted = false;
+        await writeMountsConfig(mountsConfig);
+
+        console.log(`[Mounts] Unmount requested: ${mount.name}`);
+        return { status: 'ok', message: 'Unmount requested' };
+      } catch (error: any) {
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    // DELETE /api/mounts/:id - Remove mount config
+    this.app.delete<{ Params: { id: string } }>('/api/mounts/:id', async (request, reply) => {
+      const fs = await import('fs/promises');
+
+      try {
+        const mountsConfig = await readMountsConfig();
+        const index = mountsConfig.mounts.findIndex((m: any) => m.id === request.params.id);
+
+        if (index === -1) {
+          return reply.status(404).send({ error: 'Mount not found' });
+        }
+
+        const mount = mountsConfig.mounts[index];
+
+        // Request unmount first
+        mount.desiredMounted = false;
+        await writeMountsConfig(mountsConfig);
+
+        // Wait for unmount (poll for up to 15 seconds)
+        for (let i = 0; i < 30; i++) {
+          if (!isMounted(mount.mountPath)) break;
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        // Remove from config
+        mountsConfig.mounts.splice(index, 1);
+        await writeMountsConfig(mountsConfig);
+
+        // Clean up files
+        try {
+          await fs.unlink(`${ERRORS_DIR}/${mount.id}.error`);
+        } catch { /* ignore */ }
+        try {
+          await fs.rmdir(mount.mountPath);
+        } catch { /* ignore */ }
+
+        console.log(`[Mounts] Deleted mount: ${mount.name}`);
+        return { status: 'ok' };
+      } catch (error: any) {
+        console.error('[Mounts] Error deleting mount:', error);
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    console.log('[UnifiedAPIServer] Mount management routes registered at /api/mounts/*');
   }
 
   /**
@@ -1108,26 +1443,47 @@ export class UnifiedAPIServer {
 
     // Get active processing queue (files currently being processed)
     this.app.get('/api/processing/queue', async (request, reply) => {
-      const items: Array<{ path: string; phase: 'light' | 'hash'; startTime?: number }> = [];
+      const items: Array<{ path: string; phase: 'light' | 'hash'; startTime?: number; plugin?: string }> = [];
 
-      // Get files in light processing
-      const lightProcessing = this.unifiedStateManager!.getLightProcessingFiles();
-      for (const [filePath, info] of lightProcessing) {
+      // Get running tasks from TaskScheduler (container plugin tasks)
+      const taskScheduler = this.getTaskScheduler?.();
+      const runningTasks = taskScheduler?.getRunningTasks() || [];
+
+      // Add running plugin tasks - map queue type to phase
+      // 'fast' queue = 'light' phase, 'background' queue = 'hash' phase
+      for (const task of runningTasks) {
         items.push({
-          path: filePath,
-          phase: 'light',
-          startTime: info.lightProcessingStartedAt
+          path: task.filePath,
+          phase: task.queue === 'background' ? 'hash' : 'light',
+          startTime: task.startTime,
+          plugin: task.pluginId
         });
       }
 
-      // Get files in hash processing
+      // Get files in light processing (midhash256 computation - no plugin yet)
+      const lightProcessing = this.unifiedStateManager!.getLightProcessingFiles();
+      for (const [filePath, info] of lightProcessing) {
+        // Only add if not already in plugin tasks
+        if (!runningTasks.some(t => t.filePath === filePath)) {
+          items.push({
+            path: filePath,
+            phase: 'light',
+            startTime: info.lightProcessingStartedAt
+          });
+        }
+      }
+
+      // Get files in hash processing (waiting for or running background tasks)
       const hashProcessing = this.unifiedStateManager!.getHashProcessingFiles();
       for (const [filePath, info] of hashProcessing) {
-        items.push({
-          path: filePath,
-          phase: 'hash',
-          startTime: info.hashProcessingStartedAt
-        });
+        // Only add if not already in plugin tasks
+        if (!runningTasks.some(t => t.filePath === filePath)) {
+          items.push({
+            path: filePath,
+            phase: 'hash',
+            startTime: info.hashProcessingStartedAt
+          });
+        }
       }
 
       return { items };
@@ -1135,24 +1491,10 @@ export class UnifiedAPIServer {
 
     // Get unified processing status snapshot (4 tabs: pending, lightProcessing, hashProcessing, done)
     this.app.get('/api/processing/status', async (request, reply) => {
-      // Get ALL file paths currently in VFS (most accurate count)
-      const allVfsFiles = this.vfs.getAllFiles();
-
-      // Count only actual media files (not virtual metadata files like .meta, .nfo)
-      const mediaFiles = allVfsFiles.filter(f => {
-        return !f.endsWith('.meta') && !f.endsWith('.nfo') && !f.endsWith('.xml');
-      });
-      const actualMediaFileCount = mediaFiles.length;
-
-      // Count files with completed hash computation
-      const filesWithHash = this.vfs.countFilesWithHash();
-
-      // Get snapshot with actual VFS counts
-      const snapshot = this.unifiedStateManager!.getSnapshot(actualMediaFileCount, this.fastQueueConcurrency, this.backgroundQueueConcurrency);
-
-      // Override totalDone with actual count of files with hashes in VFS
-      // (not just current session, but ALL files in VFS with completed hash)
-      snapshot.totalDone = filesWithHash;
+      // Get snapshot from state manager
+      // Note: VFS-related features have been moved to meta-fuse
+      // totalDone now uses state manager's count of fully processed files
+      const snapshot = this.unifiedStateManager!.getSnapshot(0, this.fastQueueConcurrency, this.backgroundQueueConcurrency);
 
       // Add queue status if available
       if (this.getQueueStatus) {
@@ -1167,6 +1509,15 @@ export class UnifiedAPIServer {
         const fastQueuePending = queueStatus.fastQueue?.pending || 0;
         const backgroundQueueRunning = queueStatus.backgroundQueue?.running || 0;
         const backgroundQueuePending = queueStatus.backgroundQueue?.pending || 0;
+
+        // "Discovered" now represents files waiting for fast queue (validated but not yet processing)
+        // This merges the old "discovered" and "awaitingFastQueue" concepts
+        snapshot.totalDiscovered = fastQueuePending;
+        snapshot.awaitingFastQueue = fastQueuePending; // Keep for backward compatibility
+
+        // Fix awaitingBackground: subtract files currently being processed by background workers
+        // hashProcessing.size includes both waiting AND running files
+        snapshot.awaitingBackground = Math.max(0, snapshot.awaitingBackground - backgroundQueueRunning);
 
         (snapshot as any).computed = {
           // Pre-process queue (validation - quick extension checks)
@@ -1195,7 +1546,63 @@ export class UnifiedAPIServer {
         };
       }
 
+      // Add failed files count from metrics
+      const metrics = performanceMetrics.getMetrics();
+      (snapshot as any).totalFailed = metrics.totalFailedFiles || 0;
+
       return snapshot;
+    });
+
+    // Get failed files list
+    this.app.get('/api/processing/failed', async (request, reply) => {
+      const metrics = performanceMetrics.getMetrics();
+      return {
+        failedFiles: metrics.failedFiles || [],
+        totalFailed: metrics.totalFailedFiles || 0
+      };
+    });
+
+    // Retry a failed file
+    this.app.post<{ Body: { filePath: string } }>('/api/processing/retry', async (request, reply) => {
+      const { filePath } = request.body;
+
+      if (!filePath) {
+        return reply.status(400).send({ error: 'filePath is required' });
+      }
+
+      try {
+        // Add file back to discovered state for reprocessing
+        this.unifiedStateManager!.addDiscovered(filePath);
+
+        // Trigger scan callback if available to pick up the file
+        if (this.triggerScanCallback) {
+          // Don't await - just trigger async
+          this.triggerScanCallback().catch(() => {});
+        }
+
+        return { status: 'ok', message: `File ${filePath} queued for retry` };
+      } catch (error: any) {
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    // Retry all failed files
+    this.app.post('/api/processing/retry-all', async (request, reply) => {
+      const metrics = performanceMetrics.getMetrics();
+      const failedFiles = metrics.failedFiles || [];
+
+      let queued = 0;
+      for (const file of failedFiles) {
+        this.unifiedStateManager!.addDiscovered(file.filePath);
+        queued++;
+      }
+
+      // Trigger scan callback if available
+      if (this.triggerScanCallback) {
+        this.triggerScanCallback().catch(() => {});
+      }
+
+      return { status: 'ok', message: `${queued} files queued for retry` };
     });
   }
 

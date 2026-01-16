@@ -11,6 +11,9 @@ interface MountConfig {
   nfsPath?: string;
   smbServer?: string;
   smbShare?: string;
+  smbUsername?: string;
+  smbPassword?: string;
+  smbDomain?: string;
   rcloneRemote?: string;
   rclonePath?: string;
 }
@@ -266,15 +269,7 @@ function Mounts() {
                 </select>
               </div>
 
-              <div className="form-group">
-                <label>Mount Path</label>
-                <input
-                  type="text"
-                  value={newMount.mountPath || ''}
-                  onChange={(e) => setNewMount({ ...newMount, mountPath: e.target.value })}
-                  placeholder="/mnt/remote"
-                />
-              </div>
+              <p className="form-hint">Mount path will be: /files/{newMount.name ? newMount.name.toLowerCase().replace(/[^a-z0-9-_]/g, '-').slice(0, 64) : '{name}'}</p>
 
               {newMount.type === 'rclone' && (
                 <>
@@ -343,6 +338,33 @@ function Mounts() {
                       value={newMount.smbShare || ''}
                       onChange={(e) => setNewMount({ ...newMount, smbShare: e.target.value })}
                       placeholder="media"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Username (optional)</label>
+                    <input
+                      type="text"
+                      value={newMount.smbUsername || ''}
+                      onChange={(e) => setNewMount({ ...newMount, smbUsername: e.target.value })}
+                      placeholder="user"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Password (optional)</label>
+                    <input
+                      type="password"
+                      value={newMount.smbPassword || ''}
+                      onChange={(e) => setNewMount({ ...newMount, smbPassword: e.target.value })}
+                      placeholder="********"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Domain (optional)</label>
+                    <input
+                      type="text"
+                      value={newMount.smbDomain || ''}
+                      onChange={(e) => setNewMount({ ...newMount, smbDomain: e.target.value })}
+                      placeholder="WORKGROUP"
                     />
                   </div>
                 </>
@@ -522,9 +544,11 @@ function Mounts() {
           bottom: 0;
           background: rgba(0, 0, 0, 0.7);
           display: flex;
-          align-items: center;
+          align-items: flex-start;
           justify-content: center;
           z-index: 1000;
+          overflow-y: auto;
+          padding: 40px 20px;
         }
 
         .modal {
@@ -533,6 +557,8 @@ function Mounts() {
           border-radius: 12px;
           width: 90%;
           max-width: 500px;
+          max-height: none;
+          margin: auto;
         }
 
         .modal-header {
@@ -592,6 +618,16 @@ function Mounts() {
           margin-top: 20px;
           padding-top: 20px;
           border-top: 1px solid var(--border-color);
+        }
+
+        .form-hint {
+          font-size: 0.85rem;
+          color: var(--text-secondary);
+          margin-bottom: 20px;
+          padding: 8px 12px;
+          background: var(--bg-tertiary);
+          border-radius: 6px;
+          font-family: monospace;
         }
       `}</style>
     </div>

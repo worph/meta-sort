@@ -157,6 +157,9 @@ export class StreamingPipeline {
             for await (const filePath of discoveryStream) {
                 this.discoveredCount++;
 
+                // Mark as discovered immediately when file is found
+                this.config.stateManager.addDiscovered(filePath);
+
                 // Stage 1: Validation (fire and forget)
                 this.validationQueue.add(() => this.validateFile(filePath))
                     .catch(err => console.error(`[Pipeline] Validation error for ${filePath}:`, err.message));
@@ -181,14 +184,16 @@ export class StreamingPipeline {
      * Stage 1: Validation
      * - Quick extension check (no file I/O)
      * - Optional MIME validation (reads file header)
-     * - Mark file as pending
+     * - Files already marked as discovered in start()
+     * - After validation passes, file is removed from discovered (tracked by PQueue pending)
      */
     private async validateFile(filePath: string): Promise<void> {
         try {
             // Extension check (instant, no I/O)
             const ext = path.extname(filePath).toLowerCase();
             if (!this.config.supportedExtensions.has(ext)) {
-                // Skip unsupported file types
+                // Skip unsupported file types - remove from discovered
+                this.config.stateManager.removeFile(filePath);
                 return;
             }
 
@@ -196,15 +201,19 @@ export class StreamingPipeline {
             // Note: Skipped for performance - extension check is sufficient
             // If needed, could add MIME validation via external library
 
-            // Mark as pending
-            this.config.stateManager.addPending(filePath);
             this.validatedCount++;
+
+            // Remove from discovered - file will be tracked by PQueue pending
+            // until a fast queue worker picks it up and calls startLightProcessing()
+            this.config.stateManager.removeFile(filePath);
 
             // Stage 2: Fast Queue - metadata + midhash256 (fire and forget)
             this.fastQueue.add(() => this.processLightPhase(filePath))
                 .catch(err => console.error(`[Pipeline] Fast queue error for ${filePath}:`, err.message));
         } catch (error: any) {
             console.error(`[Pipeline] Validation failed for ${filePath}:`, error.message);
+            // Remove failed file from discovered
+            this.config.stateManager.removeFile(filePath);
         }
     }
 

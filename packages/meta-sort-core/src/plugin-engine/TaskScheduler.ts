@@ -574,6 +574,24 @@ export class TaskScheduler extends EventEmitter {
         };
     }
 
+    /**
+     * Get currently running tasks with plugin info
+     * Delegates to container plugin scheduler
+     */
+    getRunningTasks(): Array<{
+        taskId: string;
+        pluginId: string;
+        fileHash: string;
+        filePath: string;
+        queue: TaskQueueType;
+        startTime?: number;
+    }> {
+        if (this.containerPluginScheduler) {
+            return this.containerPluginScheduler.getRunningTasks();
+        }
+        return [];
+    }
+
     // =========================================================================
     // Shutdown
     // =========================================================================

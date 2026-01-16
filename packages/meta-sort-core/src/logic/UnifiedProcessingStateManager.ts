@@ -2,7 +2,7 @@
  * UnifiedProcessingStateManager
  *
  * Tracks files through the complete processing pipeline with 4 states:
- * 1. Pending: Files discovered in filesystem (not yet processed)
+ * 1. Discovered: Files discovered in filesystem (not yet processed)
  * 2. Light Processing: Quick metadata extraction + midhash256 computation (~20ms)
  * 3. Hash Processing: SHA-256 computation for compatibility (slow, background)
  * 4. Done: Fully processed files
@@ -15,7 +15,7 @@
 
 import { performanceMetrics } from '../metrics/PerformanceMetrics.js';
 
-export type FileState = 'pending' | 'lightProcessing' | 'hashProcessing' | 'done';
+export type FileState = 'discovered' | 'lightProcessing' | 'hashProcessing' | 'done';
 
 export interface UnifiedFileState {
   filePath: string;
@@ -42,16 +42,21 @@ export interface UnifiedFileState {
 }
 
 export interface UnifiedProcessingSnapshot {
-  pending: UnifiedFileState[];
+  discovered: UnifiedFileState[];
   lightProcessing: UnifiedFileState[];
   hashProcessing: UnifiedFileState[];
   done: UnifiedFileState[];
 
-  totalPending: number;
+  totalDiscovered: number;
   totalLightProcessing: number;
   totalHashProcessing: number;
   totalDone: number;
   totalFilesInVFS: number;         // Total number of files accessible in the Virtual File System
+
+  /** Files that completed validation but are waiting for fast queue */
+  awaitingFastQueue: number;
+  /** Files that completed fast queue but are waiting for background queue */
+  awaitingBackground: number;
 
   // Configuration
   fastQueueConcurrency?: number;       // Number of fast queue workers
@@ -59,7 +64,7 @@ export interface UnifiedProcessingSnapshot {
 }
 
 export class UnifiedProcessingStateManager {
-  private pending: Map<string, UnifiedFileState> = new Map();
+  private discovered: Map<string, UnifiedFileState> = new Map();
   private lightProcessing: Map<string, UnifiedFileState> = new Map();
   private hashProcessing: Map<string, UnifiedFileState> = new Map();
   private done: UnifiedFileState[] = [];
@@ -67,28 +72,35 @@ export class UnifiedProcessingStateManager {
   private totalProcessedCount = 0; // Track total number of completed files (not limited)
 
   /**
-   * Add a file to pending state (file discovered)
+   * Add a file to discovered state (file discovered)
    */
-  addPending(filePath: string): void {
-    this.pending.set(filePath, {
+  addDiscovered(filePath: string): void {
+    this.discovered.set(filePath, {
       filePath,
-      state: 'pending',
+      state: 'discovered',
       discoveredAt: Date.now()
     });
   }
 
   /**
-   * Move file from pending to light processing
+   * @deprecated Use addDiscovered instead
+   */
+  addPending(filePath: string): void {
+    this.addDiscovered(filePath);
+  }
+
+  /**
+   * Move file from discovered to light processing
    */
   startLightProcessing(filePath: string): void {
-    const pendingState = this.pending.get(filePath);
+    const discoveredState = this.discovered.get(filePath);
     const existingState = this.lightProcessing.get(filePath);
-    this.pending.delete(filePath);
+    this.discovered.delete(filePath);
 
     this.lightProcessing.set(filePath, {
       filePath,
       state: 'lightProcessing',
-      discoveredAt: pendingState?.discoveredAt || existingState?.discoveredAt,
+      discoveredAt: discoveredState?.discoveredAt || existingState?.discoveredAt,
       lightProcessingStartedAt: Date.now(),
       retryCount: existingState?.retryCount || 0
     });
@@ -204,7 +216,7 @@ export class UnifiedProcessingStateManager {
    * Remove a file from all states (e.g., when deleted)
    */
   removeFile(filePath: string): void {
-    this.pending.delete(filePath);
+    this.discovered.delete(filePath);
     this.lightProcessing.delete(filePath);
     this.hashProcessing.delete(filePath);
     this.done = this.done.filter(f => f.filePath !== filePath);
@@ -221,10 +233,10 @@ export class UnifiedProcessingStateManager {
     const MAX_ITEMS_PER_STATE = 100;
 
     // Efficiently extract only the needed items without creating full arrays
-    const getPendingSample = (): UnifiedFileState[] => {
+    const getDiscoveredSample = (): UnifiedFileState[] => {
       const result: UnifiedFileState[] = [];
       let count = 0;
-      for (const item of this.pending.values()) {
+      for (const item of this.discovered.values()) {
         if (count >= MAX_ITEMS_PER_STATE) break;
         result.push(item);
         count++;
@@ -255,16 +267,21 @@ export class UnifiedProcessingStateManager {
     };
 
     return {
-      pending: getPendingSample(),
+      discovered: getDiscoveredSample(),
       lightProcessing: getLightProcessingSample(),
       hashProcessing: getHashProcessingSample(),
       done: this.done.slice(0, 50), // Return only last 50 for API
 
-      totalPending: this.pending.size,
+      totalDiscovered: this.discovered.size,
       totalLightProcessing: this.lightProcessing.size,
       totalHashProcessing: this.hashProcessing.size,
       totalDone: this.totalProcessedCount, // Total count of all processed files (not limited to history)
       totalFilesInVFS: vfsFileCount, // Total number of files accessible in the Virtual File System
+
+      // Files that completed validation but are waiting for fast queue (set by API layer from queue status)
+      awaitingFastQueue: 0,
+      // Files that completed fast queue but are waiting for/in background queue
+      awaitingBackground: this.hashProcessing.size,
 
       fastQueueConcurrency,
       backgroundQueueConcurrency
@@ -275,7 +292,7 @@ export class UnifiedProcessingStateManager {
    * Get the state of a file in any processing queue
    */
   getFileState(filePath: string): UnifiedFileState | undefined {
-    return this.pending.get(filePath) ||
+    return this.discovered.get(filePath) ||
            this.lightProcessing.get(filePath) ||
            this.hashProcessing.get(filePath);
   }
@@ -284,7 +301,7 @@ export class UnifiedProcessingStateManager {
    * Clear all states (useful for testing or reset)
    */
   clear(): void {
-    this.pending.clear();
+    this.discovered.clear();
     this.lightProcessing.clear();
     this.hashProcessing.clear();
     this.done = [];
@@ -295,11 +312,11 @@ export class UnifiedProcessingStateManager {
    * Get the total number of files in all states
    */
   getTotalFileCount(): number {
-    return this.pending.size + this.lightProcessing.size + this.hashProcessing.size + this.done.length;
+    return this.discovered.size + this.lightProcessing.size + this.hashProcessing.size + this.done.length;
   }
 
   /**
-   * Retry processing for a file (move back to pending with incremented retry count)
+   * Retry processing for a file (move back to discovered with incremented retry count)
    */
   retryProcessing(filePath: string): boolean {
     const lightState = this.lightProcessing.get(filePath);
@@ -315,9 +332,9 @@ export class UnifiedProcessingStateManager {
     this.lightProcessing.delete(filePath);
     this.hashProcessing.delete(filePath);
 
-    this.pending.set(filePath, {
+    this.discovered.set(filePath, {
       filePath,
-      state: 'pending',
+      state: 'discovered',
       discoveredAt: state.discoveredAt,
       retryCount,
       lastRetryAt: Date.now()
@@ -332,8 +349,16 @@ export class UnifiedProcessingStateManager {
   getRetryCount(filePath: string): number {
     const lightState = this.lightProcessing.get(filePath);
     const hashState = this.hashProcessing.get(filePath);
-    const pendingState = this.pending.get(filePath);
-    return lightState?.retryCount || hashState?.retryCount || pendingState?.retryCount || 0;
+    const discoveredState = this.discovered.get(filePath);
+    return lightState?.retryCount || hashState?.retryCount || discoveredState?.retryCount || 0;
+  }
+
+  /**
+   * Get all files currently discovered (not yet processing)
+   * Returns the internal Map for direct iteration
+   */
+  getDiscoveredFiles(): Map<string, UnifiedFileState> {
+    return this.discovered;
   }
 
   /**

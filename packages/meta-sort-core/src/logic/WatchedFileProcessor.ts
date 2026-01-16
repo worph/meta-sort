@@ -285,9 +285,16 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         }
     }
 
+    markDiscovered(filePath: string): void {
+        // STATE 1: Mark as discovered when file is found (before queue)
+        this.unifiedStateManager.addDiscovered(filePath);
+    }
+
+    /**
+     * @deprecated Use markDiscovered instead
+     */
     markPending(filePath: string): void {
-        // STATE 1: Mark as pending when file is discovered (before queue)
-        this.unifiedStateManager.addPending(filePath);
+        this.markDiscovered(filePath);
     }
 
     async queueFile(filePath: string): Promise<void> {
