@@ -258,6 +258,10 @@ process.on('SIGINT', async () => {
             console.log('[Startup] ContainerPluginScheduler connected to StreamingPipeline');
         }
 
+        // Connect StreamingPipeline to API server (for pause/resume control)
+        apiServer.setStreamingPipeline(pipeline);
+        console.log('[Startup] StreamingPipeline connected to API server');
+
         // First, rebuild VFS from KV to restore state from previous runs
         console.log('[Startup] Rebuilding VirtualFileSystem from KV...');
         await fileProcessor.rebuildVFSFromKV();

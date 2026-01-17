@@ -103,6 +103,12 @@ export class DockerClient {
             }
         }
 
+        // Build Binds array for bind mounts
+        const binds = options.mounts?.map(m => {
+            const opts = [m.readonly ? 'ro' : 'rw'];
+            return `${m.source}:${m.target}:${opts.join(',')}`;
+        }) || [];
+
         const createOptions: ContainerCreateOptions = {
             Image: options.image,
             name: options.name,
@@ -111,9 +117,7 @@ export class DockerClient {
                 : undefined,
             Labels: labels,
             HostConfig: {
-                Binds: options.mounts?.map(m =>
-                    `${m.source}:${m.target}:${m.readonly ? 'ro' : 'rw'}`
-                ),
+                Binds: binds.length > 0 ? binds : undefined,
                 NetworkMode: options.network,
                 Memory: options.resources?.memory
                     ? parseMemoryLimit(options.resources.memory)

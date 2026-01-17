@@ -17,7 +17,8 @@ import type { KVManager } from '../kv/KVManager.js';
 import { config } from '../config/EnvConfig.js';
 import type { PluginManager } from '../plugin-engine/PluginManager.js';
 import type { TaskScheduler } from '../plugin-engine/TaskScheduler.js';
-import type { ContainerManager, ContainerPluginScheduler, PluginCallbackPayload } from '../container-plugins/index.js';
+import type { ContainerManager, ContainerPluginScheduler, PluginCallbackPayload, GateStatus } from '../container-plugins/index.js';
+import type { StreamingPipeline } from '../logic/pipeline/StreamingPipeline.js';
 
 export interface UnifiedAPIServerConfig {
   /** Port to listen on (default: 3000) */
@@ -44,6 +45,7 @@ export class UnifiedAPIServer {
   private getTaskScheduler: (() => TaskScheduler | null) | null = null;
   private containerManager: ContainerManager | null = null;
   private containerPluginScheduler: ContainerPluginScheduler | null = null;
+  private streamingPipeline: StreamingPipeline | null = null;
 
   // Cache for total file size (avoid running du on every request)
   private totalSizeCache: { value: number; timestamp: number } | null = null;
@@ -104,34 +106,43 @@ export class UnifiedAPIServer {
   }
 
   /**
-   * Get total size of watch folders using du command (cached)
+   * Get total size of processed files from Redis sizeByte field (cached)
+   * This is "eventually correct" - accumulates as files are processed by the file-info plugin
    */
-  private getTotalWatchFolderSize(): number {
+  private async getTotalFileSizeFromRedis(): Promise<number> {
     // Check cache
     const now = Date.now();
     if (this.totalSizeCache && (now - this.totalSizeCache.timestamp) < UnifiedAPIServer.TOTAL_SIZE_CACHE_TTL_MS) {
       return this.totalSizeCache.value;
     }
 
-    // Calculate total size using du -sb on each watch folder
+    // Sum sizeByte from all file entries in Redis
     let totalSize = 0;
-    const watchFolders = config.WATCH_FOLDER_LIST?.split(',').map(f => f.trim()).filter(f => f) || [];
 
-    for (const folder of watchFolders) {
-      try {
-        // du -sb gives total bytes for directory
-        const output = execSync(`du -sb "${folder}" 2>/dev/null || echo "0"`, {
-          encoding: 'utf8',
-          timeout: 10000 // 10s timeout per folder
-        });
-        const bytes = parseInt(output.split('\t')[0], 10);
-        if (!isNaN(bytes)) {
-          totalSize += bytes;
+    if (!this.kvClient) {
+      return 0;
+    }
+
+    try {
+      // Get all file hash IDs
+      const hashIds = await this.kvClient.getAllHashIds();
+
+      // Sum up sizeByte values (batch process for efficiency)
+      for (const hashId of hashIds) {
+        try {
+          const sizeByte = await this.kvClient.getMetadata(hashId, 'sizeByte');
+          if (sizeByte !== null && sizeByte !== undefined) {
+            const size = typeof sizeByte === 'number' ? sizeByte : parseInt(String(sizeByte), 10);
+            if (!isNaN(size) && size > 0) {
+              totalSize += size;
+            }
+          }
+        } catch {
+          // Skip entries without sizeByte
         }
-      } catch (error) {
-        // Skip folders that fail (permission issues, doesn't exist, etc.)
-        console.warn(`Failed to get size for folder ${folder}:`, error);
       }
+    } catch (error) {
+      console.warn('[API] Failed to calculate total size from Redis:', error);
     }
 
     // Update cache
@@ -562,6 +573,89 @@ export class UnifiedAPIServer {
         console.log(`[Mounts] Unmount requested: ${mount.name}`);
         return { status: 'ok', message: 'Unmount requested' };
       } catch (error: any) {
+        return reply.status(500).send({ error: error.message });
+      }
+    });
+
+    // POST /api/mounts/:id/safe-unmount - Safe unmount with queue drain
+    // Closes gate, waits for queues to empty, then unmounts
+    this.app.post<{
+      Params: { id: string };
+      Querystring: { timeout?: string };
+    }>('/api/mounts/:id/safe-unmount', async (request, reply) => {
+      const timeoutMs = parseInt(request.query.timeout || '60000', 10);
+
+      try {
+        const mountsConfig = await readMountsConfig();
+        const mount = mountsConfig.mounts.find((m: any) => m.id === request.params.id);
+
+        if (!mount) {
+          return reply.status(404).send({ error: 'Mount not found' });
+        }
+
+        // Step 1: Close the gate to stop new jobs
+        if (this.containerPluginScheduler) {
+          console.log(`[Mounts] Safe unmount: closing gate for ${mount.name}`);
+          this.containerPluginScheduler.setGate(false);
+
+          // Step 2: Wait for queues to drain
+          console.log(`[Mounts] Safe unmount: waiting for queues to drain (timeout: ${timeoutMs}ms)`);
+          const drained = await this.containerPluginScheduler.waitForEmpty(timeoutMs);
+
+          if (!drained) {
+            // Re-open gate and abort
+            this.containerPluginScheduler.setGate(true);
+            const gateStatus = this.containerPluginScheduler.getGateStatus();
+            return reply.status(408).send({
+              status: 'timeout',
+              message: `Queue did not drain within ${timeoutMs}ms. Gate re-opened.`,
+              gateStatus
+            });
+          }
+        }
+
+        // Step 3: Request unmount
+        mount.desiredMounted = false;
+        await writeMountsConfig(mountsConfig);
+
+        // Step 4: Wait for unmount to complete
+        console.log(`[Mounts] Safe unmount: waiting for mount to detach: ${mount.name}`);
+        let unmountSuccess = false;
+        for (let i = 0; i < 30; i++) { // 15 seconds max wait
+          if (!isMounted(mount.mountPath)) {
+            unmountSuccess = true;
+            break;
+          }
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        // Step 5: Re-open the gate
+        if (this.containerPluginScheduler) {
+          console.log(`[Mounts] Safe unmount: re-opening gate`);
+          this.containerPluginScheduler.setGate(true);
+        }
+
+        if (!unmountSuccess) {
+          console.warn(`[Mounts] Safe unmount: mount still attached after timeout: ${mount.name}`);
+          return {
+            status: 'warning',
+            message: 'Unmount requested but mount may still be attached',
+            gateStatus: this.containerPluginScheduler?.getGateStatus() ?? null
+          };
+        }
+
+        console.log(`[Mounts] Safe unmount completed: ${mount.name}`);
+        return {
+          status: 'ok',
+          message: 'Safe unmount completed',
+          gateStatus: this.containerPluginScheduler?.getGateStatus() ?? null
+        };
+      } catch (error: any) {
+        // Re-open gate on error
+        if (this.containerPluginScheduler) {
+          this.containerPluginScheduler.setGate(true);
+        }
+        console.error(`[Mounts] Safe unmount error: ${error.message}`);
         return reply.status(500).send({ error: error.message });
       }
     });
@@ -1341,8 +1435,8 @@ export class UnifiedAPIServer {
           }
         }
 
-        // Get total size of watch folders (cached, uses du command)
-        const totalSize = this.getTotalWatchFolderSize();
+        // Get total size from Redis sizeByte (eventually correct as files are processed)
+        const totalSize = await this.getTotalFileSizeFromRedis();
 
         return {
           prefix: 'file:',
@@ -1519,6 +1613,9 @@ export class UnifiedAPIServer {
         // hashProcessing.size includes both waiting AND running files
         snapshot.awaitingBackground = Math.max(0, snapshot.awaitingBackground - backgroundQueueRunning);
 
+        // Get gate status if container scheduler is available
+        const gateStatus = this.containerPluginScheduler?.getGateStatus();
+
         (snapshot as any).computed = {
           // Pre-process queue (validation - quick extension checks)
           preProcessRunning,
@@ -1536,6 +1633,11 @@ export class UnifiedAPIServer {
           backgroundQueuePending,
           backgroundQueueTotal: backgroundQueueRunning + backgroundQueuePending + (queueStatus.backgroundQueue?.size || 0),
           backgroundQueuePaused: queueStatus.backgroundQueue?.isPaused || false,
+
+          // Gate control status (for safe mount/unmount operations)
+          gateOpen: gateStatus?.isOpen ?? true,
+          gateStatus: gateStatus ?? null,
+          pipelinePaused: this.streamingPipeline?.isPaused() ?? false,
 
           // Legacy compatibility fields (UI may still reference these)
           actualRunningHashWorkers: backgroundQueueRunning,
@@ -1604,6 +1706,80 @@ export class UnifiedAPIServer {
 
       return { status: 'ok', message: `${queued} files queued for retry` };
     });
+
+    // POST /api/processing/stop - Stop all processing
+    // Pauses pipeline queues and closes container plugin gate
+    // Running tasks will complete, but no new tasks will start
+    this.app.post('/api/processing/stop', async (request, reply) => {
+      // Pause the streaming pipeline (stops new files from being processed)
+      if (this.streamingPipeline) {
+        this.streamingPipeline.pause();
+      }
+
+      // Close the container plugin gate (stops new plugin tasks)
+      if (this.containerPluginScheduler) {
+        this.containerPluginScheduler.setGate(false);
+      }
+
+      const gateStatus = this.containerPluginScheduler?.getGateStatus() ?? null;
+      const pipelinePaused = this.streamingPipeline?.isPaused() ?? false;
+
+      console.log('[API] Processing stopped - pipeline paused, gate closed');
+
+      return {
+        status: 'ok',
+        message: 'Processing stopped - pipeline paused, gate closed',
+        gateStatus,
+        pipelinePaused
+      };
+    });
+
+    // POST /api/processing/start - Resume all processing
+    // Resumes pipeline queues and opens container plugin gate
+    this.app.post('/api/processing/start', async (request, reply) => {
+      // Resume the streaming pipeline
+      if (this.streamingPipeline) {
+        this.streamingPipeline.resume();
+      }
+
+      // Open the container plugin gate
+      if (this.containerPluginScheduler) {
+        this.containerPluginScheduler.setGate(true);
+      }
+
+      const gateStatus = this.containerPluginScheduler?.getGateStatus() ?? null;
+      const pipelinePaused = this.streamingPipeline?.isPaused() ?? false;
+
+      console.log('[API] Processing started - pipeline resumed, gate opened');
+
+      return {
+        status: 'ok',
+        message: 'Processing started - pipeline resumed, gate opened',
+        gateStatus,
+        pipelinePaused
+      };
+    });
+
+    // POST /api/processing/wait-empty - Wait for queues to drain
+    // Optional query param: timeout (ms, default 60000)
+    this.app.post<{ Querystring: { timeout?: string } }>('/api/processing/wait-empty', async (request, reply) => {
+      if (!this.containerPluginScheduler) {
+        return reply.status(503).send({
+          status: 'error',
+          message: 'Container plugin scheduler not available'
+        });
+      }
+
+      const timeoutMs = parseInt(request.query.timeout || '60000', 10);
+      const success = await this.containerPluginScheduler.waitForEmpty(timeoutMs);
+      const gateStatus = this.containerPluginScheduler.getGateStatus();
+
+      return {
+        status: success ? 'ok' : 'timeout',
+        message: success ? 'Queues are empty' : `Timeout after ${timeoutMs}ms`,
+        gateStatus
+      };
+    });
   }
 
 
@@ -1639,8 +1815,8 @@ export class UnifiedAPIServer {
           }
         }
 
-        // Get total size of watch folders (cached, uses du command)
-        const totalSize = this.getTotalWatchFolderSize();
+        // Get total size from Redis sizeByte (eventually correct as files are processed)
+        const totalSize = await this.getTotalFileSizeFromRedis();
 
         return {
           fileCount: hashIds.length,
@@ -2481,6 +2657,14 @@ export class UnifiedAPIServer {
     this.containerManager = containerManager;
     this.containerPluginScheduler = scheduler;
     console.log('[UnifiedAPIServer] Container plugin manager and scheduler set');
+  }
+
+  /**
+   * Set streaming pipeline (for pause/resume control)
+   */
+  public setStreamingPipeline(pipeline: StreamingPipeline): void {
+    this.streamingPipeline = pipeline;
+    console.log('[UnifiedAPIServer] Streaming pipeline set');
   }
 
   /**

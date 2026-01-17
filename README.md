@@ -64,28 +64,36 @@ The **FILES_VOLUME** (canonical name: `/files`) is the shared drive for all medi
 
 ```
 FILES_VOLUME (/files)
-├── media1/                    # Local folder mounted from host
+├── watch/                     # Host media folder (read-only bind mount)
 │   ├── Movies/
 │   │   └── Inception (2010)/
 │   │       └── Inception.mkv
 │   └── TV Shows/
 │       └── Breaking Bad/
-│           └── Season 01/
 │
-├── media2/                    # Another local media folder
-│   └── Anime/
-│       └── Steins Gate/
+├── test/                      # Test media folder (development)
 │
-├── smb/                       # SMB/CIFS remote mount
-│   └── NAS-Media/
-│       └── Movies/
+├── plugin/                    # Plugin output files (read-write)
+│   └── {plugin-id}/           # Per-plugin output directory
 │
-├── nfs/                       # NFS remote mount
-│   └── server-media/
-│
-└── gdrive/                    # rclone remote mount (Google Drive)
-    └── Cloud-Media/
+└── corn/                      # SMB/rclone mounts (mounted inside container)
+    ├── nas-share/             # SMB mount via rclone
+    └── gdrive/                # Google Drive mount via rclone
 ```
+
+### WebDAV File Access
+
+meta-sort exposes `/files` via **WebDAV** at the `/webdav/` endpoint. This allows:
+- **Container plugins** to access files without direct volume mounts
+- **meta-fuse** and **meta-stremio** to read files from meta-sort
+- Access to dynamic mounts (SMB, rclone) that can't be pre-mounted in other containers
+
+```
+Container Plugin ──► WebDAV (http://meta-sort/webdav/) ──► /files/
+                     GET, PUT, DELETE, MKCOL supported
+```
+
+Environment variable: `PLUGIN_WEBDAV_URL=http://meta-sort-dev/webdav`
 
 ### File Path References
 
@@ -501,8 +509,20 @@ services:
 | `META_CORE_PATH` | `/meta-core` | Path to META_CORE_VOLUME (infrastructure) |
 | `FILES_PATH` | `/files` | Path to FILES_VOLUME (shared media) |
 | `REDIS_URL` | Auto-discover | Redis connection (from leader lock file) |
-| `WATCH_PATHS` | `$FILES_PATH` | Folders to watch for media |
+| `WATCH_FOLDER_LIST` | `$FILES_PATH` | Comma-separated folders to watch for media |
 | `SERVICE_NAME` | Container hostname | Unique service identifier |
+| `BASE_URL` | `http://localhost:8180` | External URL for this service |
+
+**Container Plugins:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTAINER_PLUGINS_CONFIG` | `/app/plugins.yml` | Path to plugins configuration |
+| `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Docker socket for container management |
+| `CONTAINER_CALLBACK_URL` | `http://meta-sort:80` | URL plugins use to call back |
+| `CONTAINER_NETWORK` | `meta-network` | Docker network for plugin containers |
+| `PLUGIN_WEBDAV_URL` | - | WebDAV URL for plugin file access (e.g., `http://meta-sort-dev/webdav`) |
+| `PLUGIN_STACK_NAME` | - | Docker Compose project name for grouping containers |
 
 ---
 
@@ -538,20 +558,30 @@ Plugins are the core processing units that extract and enrich metadata. Each plu
 - Runs in either **fast** (high concurrency) or **background** (low concurrency) queue
 - Can depend on other plugins to ensure correct execution order
 
-### Built-in Plugins
+### Container Plugins
 
-| Plugin | Queue | Priority | Description |
-|--------|-------|----------|-------------|
-| **file-info** | fast | 10 | Basic file info (type, MIME, size, midhash256) |
-| **ffmpeg** | fast | 15 | Video/audio/subtitle stream metadata via FFprobe |
-| **filename-parser** | fast | 20 | Parse title, season, episode, year, quality from filename |
-| **jellyfin-nfo** | fast | 25 | Parse Jellyfin/Kodi NFO metadata files |
-| **tmdb** | background | 30 | Fetch metadata from The Movie Database API |
-| **anime-detector** | fast | 35 | Detect anime content from keywords and audio tracks |
-| **language** | fast | 40 | Aggregate languages from all streams (ISO 639-3) |
-| **subtitle** | fast | 45 | Find sibling subtitle files and detect language |
-| **torrent** | fast | 50 | Parse .torrent file metadata |
-| **full-hash** | background | 100 | Compute SHA-256 hash of entire file |
+All plugins run as **Docker containers** for isolation and flexibility. Plugins are configured in `plugins.yml` and communicate via HTTP API.
+
+| Plugin | Language | Queue | Priority | Description |
+|--------|----------|-------|----------|-------------|
+| **file-info** | TypeScript | fast | 10 | Basic file info (type, MIME, size, midhash256) |
+| **ffmpeg** | TypeScript | fast | 15 | Video/audio/subtitle stream metadata via FFprobe |
+| **filename-parser** | TypeScript | fast | 20 | Parse title, season, episode, year, quality from filename |
+| **jellyfin-nfo** | TypeScript | fast | 25 | Parse Jellyfin/Kodi NFO metadata files |
+| **tmdb** | TypeScript | background | 30 | Fetch metadata from The Movie Database API |
+| **anime-detector** | TypeScript | fast | 35 | Detect anime content from keywords and audio tracks |
+| **language** | TypeScript | fast | 40 | Aggregate languages from all streams (ISO 639-3) |
+| **subtitle** | TypeScript | fast | 45 | Find sibling subtitle files and detect language |
+| **torrent** | TypeScript | fast | 50 | Parse .torrent file metadata |
+| **full-hash** | TypeScript | background | 100 | Compute SHA-256/SHA-1/MD5 hashes (JS implementation) |
+| **fast-full-hash** | **Rust** | background | 100 | High-performance multi-algorithm hashing (Rust/Axum) |
+
+### Plugin File Access
+
+Plugins access files via **WebDAV** served by meta-sort nginx. This allows plugins to:
+- Access files without requiring direct volume mounts
+- See SMB/rclone mounts that are mounted dynamically inside meta-sort
+- Read and write to the plugin output directory at `/files/plugin/`
 
 ### Plugin Manifest Example
 

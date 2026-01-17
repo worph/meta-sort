@@ -47,6 +47,9 @@ export interface ComputedQueueStats {
     backgroundQueueTotal: number;
     backgroundQueuePaused: boolean;
 
+    // Gate control status
+    gateOpen: boolean;
+
     // Legacy fields for backwards compatibility
     actualRunningLightWorkers: number;
     actualRunningHashWorkers: number;

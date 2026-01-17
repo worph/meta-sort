@@ -31,4 +31,5 @@ export {
     ContainerPluginScheduler,
     createContainerPluginScheduler,
     type ContainerSchedulerEvents,
+    type GateStatus,
 } from './ContainerPluginScheduler.js';

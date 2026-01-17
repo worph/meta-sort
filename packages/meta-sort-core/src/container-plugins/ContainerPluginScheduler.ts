@@ -44,6 +44,17 @@ interface PendingCallback {
 }
 
 /**
+ * Gate status for queue control
+ */
+export interface GateStatus {
+    isOpen: boolean;
+    fastPending: number;
+    fastRunning: number;
+    backgroundPending: number;
+    backgroundRunning: number;
+}
+
+/**
  * Container Plugin Scheduler
  */
 export class ContainerPluginScheduler extends EventEmitter {
@@ -59,6 +70,7 @@ export class ContainerPluginScheduler extends EventEmitter {
     private metaCoreUrl: string;
     private defaultTimeout: number = 60000; // 60 seconds
     private kvClient: IKVClient | null = null;
+    private isAcceptingNewTasks: boolean = true; // Gate control for safe mount/unmount
 
     constructor(
         containerManager: ContainerManager,
@@ -231,13 +243,29 @@ export class ContainerPluginScheduler extends EventEmitter {
 
     /**
      * Enqueue a task for execution
+     * Returns false if the gate is closed and the task was rejected
      */
-    enqueueTask(task: ContainerTask): void {
+    enqueueTask(task: ContainerTask): boolean {
+        if (!this.isAcceptingNewTasks) {
+            console.log(`[Gate] Task ${task.id} rejected - gate closed (plugin: ${task.pluginId}, file: ${task.filePath})`);
+            // Remove from tracking since it won't be executed
+            this.pendingTasks.delete(task.id);
+            const fileTasks = this.fileTasks.get(task.fileHash);
+            if (fileTasks) {
+                fileTasks.delete(task.id);
+                if (fileTasks.size === 0) {
+                    this.fileTasks.delete(task.fileHash);
+                }
+            }
+            return false;
+        }
+
         const queue = task.queue === 'background' ? this.backgroundQueue : this.fastQueue;
 
         queue.add(async () => {
             await this.executeTask(task);
         });
+        return true;
     }
 
     /**
@@ -521,6 +549,66 @@ export class ContainerPluginScheduler extends EventEmitter {
             pendingTasks: this.pendingTasks.size,
             pendingCallbacks: this.pendingCallbacks.size,
         };
+    }
+
+    /**
+     * Set the gate state (open/closed)
+     * When closed, new tasks will be rejected but existing tasks will complete
+     */
+    setGate(accepting: boolean): void {
+        const wasAccepting = this.isAcceptingNewTasks;
+        this.isAcceptingNewTasks = accepting;
+        if (wasAccepting !== accepting) {
+            console.log(`[Gate] Gate ${accepting ? 'opened' : 'closed'} - ${accepting ? 'accepting' : 'rejecting'} new tasks`);
+        }
+    }
+
+    /**
+     * Check if the gate is open (accepting new tasks)
+     */
+    isGateOpen(): boolean {
+        return this.isAcceptingNewTasks;
+    }
+
+    /**
+     * Get detailed gate status including queue counts
+     */
+    getGateStatus(): GateStatus {
+        const queueStatus = this.getQueueStatus();
+        return {
+            isOpen: this.isAcceptingNewTasks,
+            fastPending: queueStatus.fast.pending,
+            fastRunning: queueStatus.fast.running,
+            backgroundPending: queueStatus.background.pending,
+            backgroundRunning: queueStatus.background.running,
+        };
+    }
+
+    /**
+     * Wait for both queues to drain (all tasks completed)
+     * Useful for safe unmount operations
+     * @param timeoutMs Maximum time to wait (default: 60000ms)
+     * @returns true if queues are empty, false if timeout
+     */
+    async waitForEmpty(timeoutMs: number = 60000): Promise<boolean> {
+        const start = Date.now();
+        const pollInterval = 500;
+
+        while (Date.now() - start < timeoutMs) {
+            const status = this.getGateStatus();
+            const totalActive = status.fastPending + status.fastRunning +
+                               status.backgroundPending + status.backgroundRunning;
+
+            if (totalActive === 0) {
+                console.log(`[Gate] Queues drained after ${Date.now() - start}ms`);
+                return true;
+            }
+
+            await new Promise(r => setTimeout(r, pollInterval));
+        }
+
+        console.log(`[Gate] Timeout waiting for queues to drain (${timeoutMs}ms)`);
+        return false;
     }
 
     /**

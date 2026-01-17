@@ -113,21 +113,11 @@ interface EnvConfig {
     CONTAINER_NETWORK: string;
 
     /**
-     * Plugin file mounts - maps subpaths to host paths for /files in plugin containers.
-     * Format: "subpath:host_path,subpath2:host_path2"
-     * Example: "watch:/data/media,test:/app/test/media"
-     * Results in /files/watch and /files/test mounted in plugin containers (read-only).
+     * WebDAV URL for plugin file access.
+     * Plugins access /files via this WebDAV endpoint served by meta-sort nginx.
+     * Example: "http://meta-sort-dev/webdav"
      */
-    PLUGIN_FILE_MOUNTS?: string;
-
-    /** Host path for plugin cache folder - each plugin gets its own subdirectory at /cache (optional, dev only) */
-    PLUGIN_CACHE_FOLDER?: string;
-
-    /**
-     * Host path for plugin output folders - each plugin gets /files/plugin/<id> mount (READ-WRITE)
-     * Plugins decide whether to use this folder - we always mount it if this env is set
-     */
-    PLUGIN_OUTPUT_FOLDER?: string;
+    PLUGIN_WEBDAV_URL?: string;
 
     /** Docker Compose project name for grouping containers in Docker Desktop (optional). When set, plugin containers appear grouped as a stack. */
     PLUGIN_STACK_NAME?: string;
@@ -202,9 +192,7 @@ export const config: EnvConfig = {
     CONTAINER_CALLBACK_URL: process.env.CONTAINER_CALLBACK_URL || 'http://meta-sort:8180',
     CONTAINER_META_CORE_URL: process.env.CONTAINER_META_CORE_URL || 'http://meta-sort:9000',
     CONTAINER_NETWORK: process.env.CONTAINER_NETWORK || 'meta-network',
-    PLUGIN_FILE_MOUNTS: process.env.PLUGIN_FILE_MOUNTS,
-    PLUGIN_CACHE_FOLDER: process.env.PLUGIN_CACHE_FOLDER,
-    PLUGIN_OUTPUT_FOLDER: process.env.PLUGIN_OUTPUT_FOLDER,
+    PLUGIN_WEBDAV_URL: process.env.PLUGIN_WEBDAV_URL,
     PLUGIN_STACK_NAME: process.env.PLUGIN_STACK_NAME,
 };
 

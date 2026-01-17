@@ -49,61 +49,28 @@ function getContainerName(pluginId: string, instanceIndex: number): string {
  */
 /**
  * ============================================================================
- * PLUGIN MOUNT ARCHITECTURE - HARDCODED PATHS
+ * PLUGIN FILE ACCESS ARCHITECTURE - WebDAV
  * ============================================================================
  *
- * Each plugin container has exactly 3 mount points (hardcoded):
+ * Plugins access the /files directory via WebDAV served by meta-sort nginx:
  *
- *   /files   (READ-ONLY)  - Files to process, same structure as meta-sort
- *   /output  (READ-WRITE) - Plugin-generated files
- *   /cache   (READ-WRITE) - Plugin-specific cache
+ *   /webdav (WebDAV endpoint) - Exposes /files with caching
+ *     /files/watch    - Watch folder (media files)
+ *     /files/test     - Test media folder
+ *     /files/plugin/  - Plugin output (each plugin writes to /files/plugin/<name>/)
+ *     /files/corn     - SMB mounts (mounted by rclone inside meta-sort)
  *
- * Host paths are configured via environment variables:
- *   - PLUGIN_FILE_MOUNTS: Maps subpaths under /files to host paths
- *     Format: "subpath:host_path,subpath2:host_path2"
- *     Example: "watch:/data/media,test:/app/test/media"
- *     Results in: /files/watch, /files/test mounted in container
+ * WebDAV configuration:
+ *   - PLUGIN_WEBDAV_URL: WebDAV endpoint URL (e.g., "http://meta-sort-dev/webdav")
  *
- *   - PLUGIN_CACHE_FOLDER: Base path for /cache mounts
- *   - PLUGIN_OUTPUT_FOLDER: Base path for /output mounts
- *
- * SECURITY: Plugins have read-only access to /files.
- * Only /cache and /output are writable.
+ * Benefits:
+ *   - Works with Docker's overlay filesystem (no NFS file handle issues)
+ *   - nginx caching for multiple plugins accessing same file
+ *   - Range requests for streaming large files
+ *   - Bidirectional (read/write) via standard HTTP methods
  *
  * ============================================================================
  */
-
-/**
- * File mount configuration - maps container path to host path
- */
-interface FileMountConfig {
-    containerPath: string;
-    hostPath: string;
-}
-
-/**
- * Parse PLUGIN_FILE_MOUNTS env var into mount configs
- * Format: "container_path:host_path,container_path2:host_path2"
- */
-function parseFileMounts(mountsStr?: string): FileMountConfig[] {
-    if (!mountsStr) {
-        return [];
-    }
-
-    const mounts: FileMountConfig[] = [];
-    const pairs = mountsStr.split(',').map(s => s.trim()).filter(s => s);
-
-    for (const pair of pairs) {
-        const [containerPath, hostPath] = pair.split(':').map(s => s.trim());
-        if (containerPath && hostPath) {
-            mounts.push({ containerPath, hostPath });
-        } else {
-            console.warn(`[ContainerManager] Invalid mount format: "${pair}" - expected "container_path:host_path"`);
-        }
-    }
-
-    return mounts;
-}
 
 export class ContainerManager extends EventEmitter {
     private dockerClient: DockerClient;
@@ -113,9 +80,7 @@ export class ContainerManager extends EventEmitter {
     private roundRobinCounters: Map<string, number> = new Map();
     private initialized: boolean = false;
     private shutdownInProgress: boolean = false;
-    private fileMounts: FileMountConfig[] = [];
-    private pluginCacheFolder?: string;
-    private pluginOutputFolder?: string;
+    private webdavUrl?: string;
     private stackName?: string;
 
     constructor(
@@ -129,14 +94,8 @@ export class ContainerManager extends EventEmitter {
         super();
         this.dockerClient = dockerClient || new DockerClient(config.DOCKER_SOCKET_PATH);
 
-        // Parse file mounts from PLUGIN_FILE_MOUNTS env var
-        this.fileMounts = parseFileMounts(config.PLUGIN_FILE_MOUNTS);
-
-        // Configure plugin cache folder (READ-WRITE)
-        this.pluginCacheFolder = config.PLUGIN_CACHE_FOLDER;
-
-        // Configure plugin output folder (READ-WRITE for /plugin-files)
-        this.pluginOutputFolder = config.PLUGIN_OUTPUT_FOLDER;
+        // WebDAV configuration for plugin file access
+        this.webdavUrl = config.PLUGIN_WEBDAV_URL;
 
         // Configure stack name for Docker Desktop grouping
         this.stackName = config.PLUGIN_STACK_NAME;
@@ -152,21 +111,18 @@ export class ContainerManager extends EventEmitter {
 
         console.log('[ContainerManager] Initializing...');
 
-        // Log configured host mounts
-        console.log('[ContainerManager] Plugin mount configuration (hardcoded paths):');
-        console.log('  /files   (RO) - Files to process:');
-        if (this.fileMounts.length > 0) {
-            for (const mount of this.fileMounts) {
-                const targetPath = mount.containerPath.startsWith('/files')
-                    ? mount.containerPath
-                    : `/files/${mount.containerPath}`;
-                console.log(`    ${targetPath} -> ${mount.hostPath}`);
-            }
+        // Log WebDAV configuration
+        console.log('[ContainerManager] Plugin file access configuration (WebDAV):');
+        if (this.webdavUrl) {
+            console.log(`  WebDAV URL: ${this.webdavUrl}`);
+            console.log('    /files/watch    - Watch folder (media files)');
+            console.log('    /files/test     - Test media folder');
+            console.log('    /files/plugin/  - Plugin output (per-plugin subdirs)');
+            console.log('    /files/corn     - SMB mounts (visible via WebDAV)');
         } else {
-            console.warn('    (not configured) - Set PLUGIN_FILE_MOUNTS');
+            console.warn('  WebDAV not configured. Set PLUGIN_WEBDAV_URL.');
+            console.warn('  Plugins will not have access to files until WebDAV is configured.');
         }
-        console.log(`  /cache  (RW) - Plugin cache:    ${this.pluginCacheFolder || '(not configured)'}`);
-        console.log(`  /output (RW) - Plugin output:   ${this.pluginOutputFolder || '(not configured)'}`)
 
         // Initialize Docker client
         await this.dockerClient.initialize();
@@ -336,47 +292,18 @@ export class ContainerManager extends EventEmitter {
         }
 
         /**
-         * PLUGIN MOUNT ARCHITECTURE - HARDCODED PATHS:
-         *   /files   (READ-ONLY)  - Files to process
-         *   /output  (READ-WRITE) - Plugin-generated files
-         *   /cache   (READ-WRITE) - Plugin-specific cache
+         * PLUGIN FILE ACCESS ARCHITECTURE - WebDAV:
+         *   Plugins access files via WebDAV URL (no container mounts needed)
+         *   Plugin output goes to /files/plugin/<plugin-id>/ via WebDAV PUT
+         *   Sees all mounts including SMB via rclone
+         *
+         * Note: No volume mounts for /files - plugins use HTTP/WebDAV client
          */
         const mounts: Array<{ source: string; target: string; readonly: boolean }> = [];
 
-        // /files/* (READ-ONLY) - Mount each configured subpath under /files
-        for (const fileMount of this.fileMounts) {
-            // fileMount.containerPath is the subpath (e.g., "watch", "test")
-            // Mount at /files/{subpath}
-            const targetPath = fileMount.containerPath.startsWith('/files')
-                ? fileMount.containerPath
-                : `/files/${fileMount.containerPath}`;
-            mounts.push({
-                source: fileMount.hostPath,
-                target: targetPath,
-                readonly: true,
-            });
-        }
-
-        if (this.fileMounts.length === 0) {
-            console.warn(`[ContainerManager] WARNING: No file mounts configured. Plugin '${pluginId}' won't have access to files.`);
-        }
-
-        // /cache (READ-WRITE) - Plugin-specific cache
-        if (this.pluginCacheFolder) {
-            mounts.push({
-                source: `${this.pluginCacheFolder}/${pluginId}`,
-                target: '/cache',
-                readonly: false,
-            });
-        }
-
-        // /output (READ-WRITE) - Plugin-generated files
-        if (this.pluginOutputFolder) {
-            mounts.push({
-                source: `${this.pluginOutputFolder}/${pluginId}`,
-                target: '/output',
-                readonly: false,
-            });
+        // No file mounts needed - plugins access files via WebDAV
+        if (!this.webdavUrl) {
+            console.warn(`[ContainerManager] WARNING: WebDAV not configured. Plugin '${pluginId}' won't have access to files. Set PLUGIN_WEBDAV_URL.`);
         }
 
         // Create container
@@ -395,6 +322,8 @@ export class ContainerManager extends EventEmitter {
                 PLUGIN_ID: pluginId,
                 META_CORE_URL: this.metaCoreUrl,
                 CALLBACK_URL: this.callbackUrl,
+                WEBDAV_URL: this.webdavUrl || '',
+                FILES_PATH: '/files', // Virtual path - files accessed via WebDAV
             },
             // Docker Desktop grouping
             stackName: this.stackName,

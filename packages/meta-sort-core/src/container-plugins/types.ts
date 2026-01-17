@@ -283,7 +283,7 @@ export interface ContainerSpawnOptions {
     env?: Record<string, string>;
     /** Resource limits */
     resources?: ContainerResourceLimits;
-    /** Volume mounts */
+    /** Volume mounts (bind mounts only - files accessed via WebDAV) */
     mounts?: Array<{
         source: string;
         target: string;

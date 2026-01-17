@@ -63,6 +63,24 @@ function Monitor() {
         }
     };
 
+    const stopProcessing = async () => {
+        try {
+            await fetch('/api/processing/stop', { method: 'POST' });
+            fetchData();
+        } catch (err) {
+            console.error('Failed to stop processing:', err);
+        }
+    };
+
+    const startProcessing = async () => {
+        try {
+            await fetch('/api/processing/start', { method: 'POST' });
+            fetchData();
+        } catch (err) {
+            console.error('Failed to start processing:', err);
+        }
+    };
+
     const retryFile = async (filePath: string) => {
         try {
             await fetch('/api/processing/retry', {
@@ -156,9 +174,20 @@ function Monitor() {
         <div className="monitor-page">
             <div className="monitor-header">
                 <h1>Processing Monitor</h1>
-                <button className="btn btn-primary" onClick={triggerScan}>
-                    Trigger Scan
-                </button>
+                <div className="header-actions">
+                    {status?.computed?.gateOpen === false ? (
+                        <button className="btn btn-success" onClick={startProcessing}>
+                            Start Processing
+                        </button>
+                    ) : (
+                        <button className="btn btn-danger" onClick={stopProcessing}>
+                            Stop Processing
+                        </button>
+                    )}
+                    <button className="btn btn-primary" onClick={triggerScan}>
+                        Trigger Scan
+                    </button>
+                </div>
             </div>
 
             {/* Pipeline Progress Bar - 6 Stage (including failed) */}
@@ -521,6 +550,29 @@ function Monitor() {
 
                 .monitor-header h1 {
                     font-size: 1.8rem;
+                }
+
+                .header-actions {
+                    display: flex;
+                    gap: 12px;
+                }
+
+                .btn-success {
+                    background: linear-gradient(135deg, #10b981, #059669);
+                    color: white;
+                }
+
+                .btn-success:hover {
+                    background: linear-gradient(135deg, #059669, #047857);
+                }
+
+                .btn-danger {
+                    background: linear-gradient(135deg, #ef4444, #dc2626);
+                    color: white;
+                }
+
+                .btn-danger:hover {
+                    background: linear-gradient(135deg, #dc2626, #b91c1c);
                 }
 
 

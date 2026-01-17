@@ -433,6 +433,36 @@ export class StreamingPipeline {
     }
 
     /**
+     * Pause all pipeline queues
+     * Running tasks will complete, but no new tasks will start
+     */
+    pause(): void {
+        this.validationQueue.pause();
+        this.fastQueue.pause();
+        this.backgroundQueue.pause();
+        console.log('[Pipeline] All queues paused');
+    }
+
+    /**
+     * Resume all pipeline queues
+     */
+    resume(): void {
+        this.validationQueue.start();
+        this.fastQueue.start();
+        this.backgroundQueue.start();
+        console.log('[Pipeline] All queues resumed');
+    }
+
+    /**
+     * Check if pipeline is paused
+     */
+    isPaused(): boolean {
+        return this.validationQueue.isPaused ||
+               this.fastQueue.isPaused ||
+               this.backgroundQueue.isPaused;
+    }
+
+    /**
      * Log current pipeline progress
      */
     private logProgress(): void {
