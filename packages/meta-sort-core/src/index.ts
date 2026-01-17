@@ -121,8 +121,15 @@ const runProgressiveDiscovery = async () => {
 // Note: Stremio updates happen automatically via incremental add/remove notifications
 // during file processing (like FUSE), so no explicit refresh needed here
 const triggerScan = async () => {
-    console.log('Triggering manual scan from API...');
+    console.log('[Scan] Triggering manual scan from API...');
+
+    // Reset pipeline counters and state before fresh scan
+    // Also publishes reset event to meta-fuse
+    await pipeline.reset();
+
+    console.log('[Scan] Starting fresh discovery...');
     await runProgressiveDiscovery();
+    console.log('[Scan] Manual scan complete');
 };
 
 // Global error handlers - prevent crashes from unforeseen errors
@@ -183,10 +190,11 @@ process.on('SIGINT', async () => {
             await kvManager.start();
             await kvManager.waitForReady();
 
-            // Pass KV client to file processor
+            // Pass KV client to file processor and pipeline
             const client = kvManager.getClient();
             if (client) {
                 fileProcessor.setKVClient(client);
+                pipeline.setKVClient(client);
                 console.log(`[Startup] KV Manager ready (role: ${kvManager.isLeader() ? 'LEADER' : 'FOLLOWER'})`);
             }
         }

@@ -1,11 +1,13 @@
 import * as path from 'path';
 import PQueue from 'p-queue';
 import {PipelineConfig} from './PipelineConfig.js';
-import {withTimeoutAndRetry, TimeoutConfig} from '../../utils/TimeoutWrapper.js';
 import {performanceMetrics} from '../../metrics/PerformanceMetrics.js';
 
 // Pub/sub channel for batched updates to meta-fuse
 const UPDATE_CHANNEL = 'meta-sort:file:batch';
+
+// Pub/sub channel for scan reset notification
+const RESET_CHANNEL = 'meta-sort:scan:reset';
 
 // Batch update interval (5 seconds)
 const BATCH_INTERVAL_MS = 5000;
@@ -38,23 +40,6 @@ export class StreamingPipeline {
     // Batch buffer for pub/sub notifications
     private batchBuffer: BatchChange[] = [];
     private batchTimer: NodeJS.Timeout | null = null;
-
-    // Retry configuration
-    private readonly MAX_PROCESSING_RETRIES = 10;
-
-    // Fast queue timeout: Fast metadata extraction + midhash256
-    private readonly fastQueueTimeoutConfig: TimeoutConfig = {
-        baseTimeout: 120000, // 2 minutes base timeout
-        timeoutMultiplier: 1.5, // Increase by 1.5x each retry
-        maxTimeout: 600000 // Max 10 minutes
-    };
-
-    // Background queue timeout: Full file hashing over NAS (can be very slow)
-    private readonly backgroundQueueTimeoutConfig: TimeoutConfig = {
-        baseTimeout: 7200000, // 2 hours base timeout (for NAS)
-        timeoutMultiplier: 1.5, // Increase by 1.5x each retry
-        maxTimeout: 14400000 // Max 4 hours
-    };
 
     constructor(config: PipelineConfig) {
         this.config = config;
@@ -223,23 +208,14 @@ export class StreamingPipeline {
      * - Compute midhash256 (< 1s)
      * - Store to KV (file becomes accessible in VFS)
      * - Queue for background processing
-     * - Includes timeout and retry logic
      */
     private async processLightPhase(filePath: string): Promise<void> {
         try {
-            // Get current retry count
-            const retryCount = this.config.stateManager.getRetryCount(filePath);
-
-            // Call light processing with timeout
+            // Call light processing
             const current = this.fastProcessedCount + 1;
             const queueSize = this.discoveredCount;
 
-            await withTimeoutAndRetry(
-                () => this.config.fileProcessor.processLightPhase(filePath, current, queueSize),
-                retryCount,
-                this.fastQueueTimeoutConfig,
-                `Fast queue processing file ${filePath}`
-            );
+            await this.config.fileProcessor.processLightPhase(filePath, current, queueSize);
 
             // After light processing, add to VFS
             const metadata = this.config.fileProcessor.getDatabase().get(filePath);
@@ -250,7 +226,6 @@ export class StreamingPipeline {
                 if (virtualPath) {
                     // Add to VFS immediately (file appears with permanent midhash256 ID)
                     this.config.virtualFileSystem.addFile(virtualPath, filePath, metadata);
-                    //console.log(`✓ File added to VFS: ${filePath} → ${virtualPath} (midhash256: ${metadata.cid_midhash256})`);
 
                     // Queue for pub/sub notification to meta-fuse
                     if (metadata.cid_midhash256) {
@@ -278,30 +253,14 @@ export class StreamingPipeline {
 
             this.fastProcessedCount++;
         } catch (error: any) {
-            // Handle timeout or processing error
-            const retryCount = this.config.stateManager.getRetryCount(filePath);
-
-            if (retryCount < this.MAX_PROCESSING_RETRIES) {
-                // Retry: move back to pending queue with incremented retry count
-                const success = this.config.stateManager.retryProcessing(filePath);
-                if (success) {
-                    console.warn(`[Pipeline] Fast queue processing failed for ${filePath} (attempt ${retryCount + 1}/${this.MAX_PROCESSING_RETRIES}), retrying with longer timeout. Error: ${error.message}`);
-
-                    // Re-queue for fast processing
-                    this.fastQueue.add(() => this.processLightPhase(filePath))
-                        .catch(err => console.error(`[Pipeline] Retry failed for ${filePath}:`, err.message));
-                    return;
-                }
-            }
-
-            // Max retries exceeded or retry failed - mark as permanently failed
-            console.error(`[Pipeline] Fast queue processing permanently failed for ${filePath} after ${retryCount + 1} attempts: ${error.message}`);
+            // Processing failed - mark as failed (manual retry available via UI)
+            console.error(`[Pipeline] Fast queue processing failed for ${filePath}: ${error.message}`);
 
             // Record failed file in metrics
             performanceMetrics.recordFailedFile(
                 filePath,
                 error.message || 'Unknown error',
-                retryCount + 1,
+                1,
                 'processing'
             );
 
@@ -315,47 +274,25 @@ export class StreamingPipeline {
      * - Compute full hashes (SHA-256, SHA-1, MD5, CRC32)
      * - Update KV with additional hash metadata
      * - Mark processing as complete
-     * - Includes timeout and retry logic
      */
     private async processHashPhase(filePath: string): Promise<void> {
         try {
-            // Get current retry count
-            const retryCount = this.config.stateManager.getRetryCount(filePath);
-
-            // Call hash processing with timeout
+            // Call hash processing
             const current = this.backgroundProcessedCount + 1;
             const queueSize = this.discoveredCount;
 
-            await withTimeoutAndRetry(
-                () => this.config.fileProcessor.processHashPhase(filePath, current, queueSize),
-                retryCount,
-                this.backgroundQueueTimeoutConfig,
-                `Background queue processing file ${filePath}`
-            );
+            await this.config.fileProcessor.processHashPhase(filePath, current, queueSize);
 
             this.backgroundProcessedCount++;
         } catch (error: any) {
-            // Handle timeout or processing error
-            const retryCount = this.config.stateManager.getRetryCount(filePath);
-
-            if (retryCount < this.MAX_PROCESSING_RETRIES) {
-                // Retry: move back to background queue with incremented retry count
-                console.warn(`[Pipeline] Background queue processing failed for ${filePath} (attempt ${retryCount + 1}/${this.MAX_PROCESSING_RETRIES}), retrying. Error: ${error.message}`);
-
-                // Re-queue for background processing
-                this.backgroundQueue.add(() => this.processHashPhase(filePath))
-                    .catch(err => console.error(`[Pipeline] Retry failed for ${filePath}:`, err.message));
-                return;
-            }
-
-            // Max retries exceeded - mark as permanently failed
-            console.error(`[Pipeline] Background queue processing permanently failed for ${filePath} after ${retryCount + 1} attempts: ${error.message}`);
+            // Processing failed - mark as failed (manual retry available via UI)
+            console.error(`[Pipeline] Background queue processing failed for ${filePath}: ${error.message}`);
 
             // Record failed file in metrics
             performanceMetrics.recordFailedFile(
                 filePath,
                 error.message || 'Unknown error',
-                retryCount + 1,
+                1,
                 'hash'
             );
 
@@ -430,6 +367,43 @@ export class StreamingPipeline {
             },
             state: this.config.stateManager.getSnapshot()
         };
+    }
+
+    /**
+     * Reset pipeline counters and clear state manager
+     * Called when triggering a fresh scan to reset statistics
+     * Publishes reset event to notify meta-fuse to clear its VFS
+     */
+    async reset(): Promise<void> {
+        console.log('[Pipeline] Resetting counters and state...');
+
+        // Reset counters
+        this.discoveredCount = 0;
+        this.validatedCount = 0;
+        this.fastProcessedCount = 0;
+        this.backgroundProcessedCount = 0;
+
+        // Clear batch buffer
+        this.batchBuffer = [];
+
+        // Clear state manager (discovered, processing, done states)
+        this.config.stateManager.clear();
+
+        // Publish reset event to notify meta-fuse
+        if (this.config.kvClient && typeof (this.config.kvClient as any).publish === 'function') {
+            try {
+                const message = JSON.stringify({
+                    timestamp: Date.now(),
+                    action: 'reset'
+                });
+                await (this.config.kvClient as any).publish(RESET_CHANNEL, message);
+                console.log('[Pipeline] Reset event published to meta-fuse');
+            } catch (error) {
+                console.error('[Pipeline] Failed to publish reset event:', error);
+            }
+        }
+
+        console.log('[Pipeline] Reset complete');
     }
 
     /**
@@ -518,6 +492,15 @@ export class StreamingPipeline {
     setContainerPluginScheduler(scheduler: import('../../container-plugins/ContainerPluginScheduler.js').ContainerPluginScheduler): void {
         (this.config as any).containerPluginScheduler = scheduler;
         console.log('[Pipeline] Container plugin scheduler connected');
+    }
+
+    /**
+     * Set the KV client (called after initialization when Redis is ready)
+     * This enables pub/sub notifications to meta-fuse
+     */
+    setKVClient(kvClient: import('../../kv/IKVClient.js').IKVClient): void {
+        (this.config as any).kvClient = kvClient;
+        console.log('[Pipeline] KV client connected - pub/sub enabled');
     }
 
     /**

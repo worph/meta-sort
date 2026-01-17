@@ -199,8 +199,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         this.taskScheduler = createTaskScheduler(pluginManager, performanceMetrics, {
             fastQueueConcurrency: config.FAST_QUEUE_CONCURRENCY,
             backgroundQueueConcurrency: config.BACKGROUND_QUEUE_CONCURRENCY,
-            fastThresholdMs: config.FAST_THRESHOLD_MS,
-            minSamplesForMeasurement: config.MIN_SAMPLES_FOR_MEASUREMENT,
         });
 
         // Set up event listeners for VFS updates
@@ -209,8 +207,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         console.log(`[WatchedFileProcessor] TaskScheduler initialized with:`);
         console.log(`  - Fast queue concurrency: ${config.FAST_QUEUE_CONCURRENCY}`);
         console.log(`  - Background queue concurrency: ${config.BACKGROUND_QUEUE_CONCURRENCY}`);
-        console.log(`  - Fast threshold: ${config.FAST_THRESHOLD_MS}ms`);
-        console.log(`  - Min samples for measurement: ${config.MIN_SAMPLES_FOR_MEASUREMENT}`);
     }
 
     /**

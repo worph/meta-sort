@@ -80,17 +80,11 @@ interface EnvConfig {
     // TaskScheduler Configuration (Plugin Queue System)
     // ========================================================================
 
-    /** Concurrency for fast plugin queue (plugins with <1s avg execution time). Default: 32 */
+    /** Concurrency for fast plugin queue. Default: 32 */
     FAST_QUEUE_CONCURRENCY: number;
 
-    /** Concurrency for background plugin queue (plugins with >=1s avg execution time). Default: 8 */
+    /** Concurrency for background plugin queue. Default: 8 */
     BACKGROUND_QUEUE_CONCURRENCY: number;
-
-    /** Threshold in ms to classify plugin as fast vs background. Default: 1000 */
-    FAST_THRESHOLD_MS: number;
-
-    /** Minimum samples before using measured timing for classification. Default: 10 */
-    MIN_SAMPLES_FOR_MEASUREMENT: number;
 
     // ========================================================================
     // Container Plugins Configuration
@@ -183,8 +177,6 @@ export const config: EnvConfig = {
     // TaskScheduler Configuration
     FAST_QUEUE_CONCURRENCY: parseInt(process.env.FAST_QUEUE_CONCURRENCY || "32", 10),
     BACKGROUND_QUEUE_CONCURRENCY: parseInt(process.env.BACKGROUND_QUEUE_CONCURRENCY || "8", 10),
-    FAST_THRESHOLD_MS: parseInt(process.env.FAST_THRESHOLD_MS || "1000", 10),
-    MIN_SAMPLES_FOR_MEASUREMENT: parseInt(process.env.MIN_SAMPLES_FOR_MEASUREMENT || "10", 10),
 
     // Container Plugins Configuration
     CONTAINER_PLUGINS_CONFIG: process.env.CONTAINER_PLUGINS_CONFIG || '/app/plugins.yml',

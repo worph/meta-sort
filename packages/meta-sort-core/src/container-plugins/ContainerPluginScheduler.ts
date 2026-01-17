@@ -90,8 +90,15 @@ export class ContainerPluginScheduler extends EventEmitter {
             concurrency: options?.fastConcurrency ?? config.FAST_QUEUE_CONCURRENCY,
         });
 
+        // Background queue starts paused - only runs when fast queue is idle
         this.backgroundQueue = new PQueue({
             concurrency: options?.backgroundConcurrency ?? config.BACKGROUND_QUEUE_CONCURRENCY,
+            autoStart: false,
+        });
+
+        // When fast queue becomes idle, start background queue
+        this.fastQueue.on('idle', () => {
+            this.onFastQueueIdle();
         });
 
         this.callbackUrl = options?.callbackUrl ?? `${config.CONTAINER_CALLBACK_URL}/api/plugins/callback`;
@@ -262,10 +269,26 @@ export class ContainerPluginScheduler extends EventEmitter {
 
         const queue = task.queue === 'background' ? this.backgroundQueue : this.fastQueue;
 
+        // If adding to fast queue, pause background queue (fast takes priority)
+        if (task.queue === 'fast' && !this.backgroundQueue.isPaused) {
+            console.log('[ContainerScheduler] Fast task added, pausing background queue');
+            this.backgroundQueue.pause();
+        }
+
         queue.add(async () => {
             await this.executeTask(task);
         });
         return true;
+    }
+
+    /**
+     * Called when fast queue becomes idle - start background queue if it has work
+     */
+    private onFastQueueIdle(): void {
+        if (this.backgroundQueue.size > 0 || this.backgroundQueue.pending > 0) {
+            console.log('[ContainerScheduler] Fast queue idle, starting background queue');
+            this.backgroundQueue.start();
+        }
     }
 
     /**
@@ -709,10 +732,15 @@ export class ContainerPluginScheduler extends EventEmitter {
 
     /**
      * Resume queues
+     * Note: Background queue only starts if fast queue is idle (fast queue has priority)
      */
     resume(): void {
         this.fastQueue.start();
-        this.backgroundQueue.start();
+        // Only start background if fast queue is empty
+        if (this.fastQueue.size === 0 && this.fastQueue.pending === 0) {
+            this.backgroundQueue.start();
+        }
+        // Otherwise, background will start when fast queue idle event fires
     }
 
     /**

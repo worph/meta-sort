@@ -9,7 +9,7 @@
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "exec": "node dist/index.js",
-    "test": "mocha",
+    "test": "tsc -p tsconfig.test.json && mocha",
     "lint": "eslint src --ext ts"
   },
   "license": "MIT",

@@ -18,7 +18,7 @@ import type {
     PluginKVStore,
 } from './types.js';
 import type { PluginManager } from './PluginManager.js';
-import type { PerformanceMetrics, PluginTimingStats } from '../metrics/PerformanceMetrics.js';
+import type { PerformanceMetrics } from '../metrics/PerformanceMetrics.js';
 import type { ContainerPluginScheduler } from '../container-plugins/index.js';
 import { KVStore } from './PluginContext.js';
 
@@ -31,17 +31,11 @@ export interface TaskSchedulerConfig {
     fastQueueConcurrency?: number;
     /** Concurrency for background queue (default: 8) */
     backgroundQueueConcurrency?: number;
-    /** Threshold in ms for fast classification (default: 1000) */
-    fastThresholdMs?: number;
-    /** Minimum samples before using measured timing (default: 10) */
-    minSamplesForMeasurement?: number;
 }
 
 const DEFAULT_CONFIG: Required<TaskSchedulerConfig> = {
     fastQueueConcurrency: 32,
     backgroundQueueConcurrency: 8,
-    fastThresholdMs: 1000,
-    minSamplesForMeasurement: 10,
 };
 
 // =============================================================================
@@ -379,25 +373,11 @@ export class TaskScheduler extends EventEmitter {
     // =========================================================================
 
     /**
-     * Classify a plugin as fast or background based on timing data and manifest
+     * Classify a plugin as fast or background based on manifest defaultQueue
      */
     classifyPlugin(pluginId: string): TaskQueueType {
-        const plugins = this.pluginManager.getPlugins();
-        const plugin = plugins.find(p => p.id === pluginId);
-        const timing = this.performanceMetrics.getPluginTiming(pluginId);
-
-        // Get manifest default queue (need to access via plugin manager internals)
-        // For now, we'll use a workaround - check if plugin has defaultQueue in manifest
         const manifest = this.getPluginManifest(pluginId);
-        const defaultQueue = manifest?.defaultQueue || 'fast';
-
-        // If we have enough samples, use measured timing
-        if (timing && timing.count >= this.config.minSamplesForMeasurement) {
-            return timing.average < this.config.fastThresholdMs ? 'fast' : 'background';
-        }
-
-        // Otherwise use manifest default
-        return defaultQueue;
+        return manifest?.defaultQueue || 'fast';
     }
 
     // =========================================================================
