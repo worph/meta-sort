@@ -178,8 +178,10 @@ export class HashIndexManager {
 
     public async saveCacheToFile(): Promise<void> {
         if (this.indexOpsInProgress || !this.hasChanged) {
+            console.log(`[HashIndexManager] saveCacheToFile: Skipping (indexOpsInProgress=${this.indexOpsInProgress}, hasChanged=${this.hasChanged}, cacheSize=${this.cache.size})`);
             return;
         }
+        console.log(`[HashIndexManager] saveCacheToFile: Starting save, cacheSize=${this.cache.size}`);
         this.hasChanged = false;
         this.indexOpsInProgress = true;
         const start = performance.now();
@@ -276,26 +278,28 @@ export class HashIndexManager {
         if (!filePath || !fileSize || !mtime || !hashs) {
             throw new Error('Invalid parameters');
         }
-        for (const hash of this.targetHash) {
-            if (!hashs[hash]) {
-                throw new Error(`Missing hash ${hash}`);
-            }
+        // Check that at least one target hash is provided
+        const providedHashes = this.targetHash.filter(hash => hashs[hash]);
+        if (providedHashes.length === 0) {
+            console.log(`[HashIndexManager] addFileCid: No target hashes provided for ${filePath}. targetHashes=${this.targetHash}, providedKeys=${Object.keys(hashs)}`);
+            throw new Error('At least one target hash must be provided');
         }
+        console.log(`[HashIndexManager] addFileCid: Adding ${filePath} with ${providedHashes.length} hashes: ${providedHashes.join(', ')}`);
         const size = fileSize + "";
         const baseName = path.basename(filePath);
         const cacheKey = `${baseName}-${size}-${mtime}`;
         let indexLine = this.cache.get(cacheKey);
         if (!indexLine) {
-            //filter only the hashes we need
+            // Filter only the hashes we need (and are provided)
             let filteredHash = {};
-            for (const hash of this.targetHash) {
+            for (const hash of providedHashes) {
                 filteredHash[hash] = hashs[hash];
             }
             const data = {path: baseName, size: size, mtime: mtime, ...filteredHash};
             this.cache.set(cacheKey, data);
         } else {
-            //update the cache with the latest data
-            for (const hash of this.targetHash) {
+            // Update the cache with the provided hashes (don't overwrite with undefined)
+            for (const hash of providedHashes) {
                 indexLine[hash] = hashs[hash];
             }
         }

@@ -169,6 +169,19 @@ export class PluginManager extends EventEmitter {
         // Save state
         await this.saveState();
 
+        // Send config to running container plugin
+        if (this.containerManager) {
+            const instance = this.containerManager.getHealthyInstance(pluginId);
+            if (instance) {
+                try {
+                    await this.containerManager.sendConfig(instance, config);
+                    console.log(`[PluginManager] Sent config update to container plugin '${pluginId}'`);
+                } catch (error) {
+                    console.warn(`[PluginManager] Failed to send config to plugin '${pluginId}':`, error);
+                }
+            }
+        }
+
         // Emit event
         this.emit('plugin:config-changed', { pluginId, config });
     }
@@ -210,6 +223,9 @@ export class PluginManager extends EventEmitter {
         // Load state for plugin active status
         const state = await this.loadState();
 
+        // Track plugins that need config sent
+        const pluginsWithPersistedConfig: Array<{ pluginId: string; config: Record<string, unknown> }> = [];
+
         for (const pluginStatus of status.plugins) {
             const manifest = this.containerManager.getPluginManifest(pluginStatus.pluginId);
             if (!manifest) continue;
@@ -248,9 +264,14 @@ export class PluginManager extends EventEmitter {
                 this.activePluginIds.add(pluginId);
             }
 
-            // Store config
-            const config = stateEntry?.config || {};
-            this.configs.set(pluginId, config);
+            // Store config from persisted state
+            const persistedConfig = stateEntry?.config || {};
+            this.configs.set(pluginId, persistedConfig);
+
+            // If there's persisted config, queue it for sending to the container
+            if (Object.keys(persistedConfig).length > 0) {
+                pluginsWithPersistedConfig.push({ pluginId, config: persistedConfig });
+            }
 
             console.log(`[PluginManager] Loaded plugin: ${pluginId}`);
         }
@@ -258,6 +279,20 @@ export class PluginManager extends EventEmitter {
         // Rebuild execution order
         this.rebuildExecutionOrder();
         await this.saveState();
+
+        // Send persisted configs to running containers
+        // This ensures configs saved via API are applied after container restart
+        for (const { pluginId, config } of pluginsWithPersistedConfig) {
+            const instance = this.containerManager.getHealthyInstance(pluginId);
+            if (instance) {
+                try {
+                    await this.containerManager.sendConfig(instance, config);
+                    console.log(`[PluginManager] Sent persisted config to plugin '${pluginId}'`);
+                } catch (error) {
+                    console.warn(`[PluginManager] Failed to send persisted config to plugin '${pluginId}':`, error);
+                }
+            }
+        }
     }
 
     /**

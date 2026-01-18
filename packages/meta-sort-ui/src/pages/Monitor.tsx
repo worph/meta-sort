@@ -103,6 +103,25 @@ function Monitor() {
         }
     };
 
+    const clearMetadata = async () => {
+        if (!window.confirm('Are you sure you want to clear all metadata? This will delete all file metadata and trigger a full rescan.')) {
+            return;
+        }
+        try {
+            const response = await fetch('/api/metadata/clear', { method: 'POST' });
+            const data = await response.json();
+            if (response.ok) {
+                alert(`Cleared ${data.deletedCount} files. Rescan triggered.`);
+            } else {
+                alert(`Failed to clear metadata: ${data.message}`);
+            }
+            fetchData();
+        } catch (err) {
+            console.error('Failed to clear metadata:', err);
+            alert('Failed to clear metadata');
+        }
+    };
+
     // Calculate progress for 6-stage pipeline (including failed)
     // Discovered = files waiting for fast queue (validated but not yet processing)
     const getProgress = () => {
@@ -186,6 +205,9 @@ function Monitor() {
                     )}
                     <button className="btn btn-primary" onClick={triggerScan}>
                         Trigger Scan
+                    </button>
+                    <button className="btn btn-warning" onClick={clearMetadata}>
+                        Clear Metadata
                     </button>
                 </div>
             </div>

@@ -181,6 +181,9 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 // Record midhash256 computation time (excludes cache hits)
                 performanceMetrics.recordHashComputation('cid_midhash256', computeTime);
                 performanceMetrics.recordCacheMiss('midhash256');
+
+                // Store in cache for future lookups
+                this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
             }
 
             // Initialize metadata with midhash256
@@ -358,6 +361,9 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 // Record midhash256 computation time (excludes cache hits)
                 performanceMetrics.recordHashComputation('cid_midhash256', computeTime);
                 performanceMetrics.recordCacheMiss('midhash256');
+
+                // Store in cache for future lookups
+                this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
             }
 
             // Initialize metadata with midhash256

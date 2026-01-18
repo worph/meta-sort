@@ -370,3 +370,75 @@ export function getEnabledPlugins(
 export function getDefaultConfigPath(): string {
     return process.env.CONTAINER_PLUGINS_CONFIG || '/app/plugins.yml';
 }
+
+/**
+ * Convert ContainerPluginConfig back to YAML-friendly format
+ */
+function configToYamlObject(config: ContainerPluginConfig): Record<string, unknown> {
+    const obj: Record<string, unknown> = {
+        enabled: config.enabled,
+        image: config.image,
+        instances: config.instances,
+    };
+
+    if (config.resources) {
+        obj.resources = config.resources;
+    }
+
+    if (config.config && Object.keys(config.config).length > 0) {
+        obj.config = config.config;
+    }
+
+    if (config.network) {
+        obj.network = config.network;
+    }
+
+    if (config.mounts && config.mounts.length > 0) {
+        obj.mounts = config.mounts;
+    }
+
+    if (config.healthCheck) {
+        obj.healthCheck = config.healthCheck;
+    }
+
+    if (config.defaultQueue) {
+        obj.defaultQueue = config.defaultQueue;
+    }
+
+    return obj;
+}
+
+/**
+ * Save container plugins configuration to YAML file
+ */
+export async function saveConfig(
+    configPath: string,
+    config: ContainerPluginsConfig
+): Promise<void> {
+    // Convert config to YAML-friendly format
+    const yamlConfig: Record<string, unknown> = {
+        version: config.version || '1.0',
+        plugins: {} as Record<string, unknown>,
+    };
+
+    for (const [pluginId, pluginConfig] of Object.entries(config.plugins)) {
+        (yamlConfig.plugins as Record<string, unknown>)[pluginId] = configToYamlObject(pluginConfig);
+    }
+
+    // Stringify to YAML
+    const yamlContent = YAML.stringify(yamlConfig, {
+        indent: 2,
+        lineWidth: 0, // Disable line wrapping
+    });
+
+    // Write to file
+    try {
+        await fs.writeFile(configPath, yamlContent, 'utf-8');
+    } catch (error) {
+        throw new ConfigParseError(
+            'Failed to write configuration file',
+            configPath,
+            error instanceof Error ? error : undefined
+        );
+    }
+}

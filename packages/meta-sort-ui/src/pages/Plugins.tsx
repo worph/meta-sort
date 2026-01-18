@@ -6,6 +6,14 @@ import {
 } from '../types';
 import { formatMs, formatNumber } from '../utils/format';
 
+interface AddPluginForm {
+    pluginId: string;
+    image: string;
+    instances: number;
+    memory: string;
+    cpus: string;
+}
+
 function Plugins() {
     const [pluginsData, setPluginsData] = useState<PluginsResponse | null>(null);
     const [timings, setTimings] = useState<PluginTiming[]>([]);
@@ -14,6 +22,18 @@ function Plugins() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [scanStatus, setScanStatus] = useState<string | null>(null);
+
+    // Container plugin management state
+    const [showAddPluginModal, setShowAddPluginModal] = useState(false);
+    const [showRemoveConfirm, setShowRemoveConfirm] = useState<string | null>(null);
+    const [addPluginForm, setAddPluginForm] = useState<AddPluginForm>({
+        pluginId: '',
+        image: '',
+        instances: 1,
+        memory: '256m',
+        cpus: '0.5',
+    });
+    const [restartAllStatus, setRestartAllStatus] = useState<string | null>(null);
 
     const fetchPlugins = useCallback(async () => {
         try {
@@ -164,6 +184,107 @@ function Plugins() {
         return timings.find(t => t.pluginId === pluginId);
     };
 
+    // Container plugin management functions
+    const restartPlugin = async (pluginId: string) => {
+        setLoading(true);
+        try {
+            const res = await fetch(`/api/plugins/containers/${pluginId}/restart`, { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.details || data.error || 'Failed to restart plugin');
+            }
+            await fetchPlugins();
+        } catch (err: any) {
+            alert(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const restartAllPlugins = async () => {
+        setLoading(true);
+        setRestartAllStatus('Restarting...');
+        try {
+            const res = await fetch('/api/plugins/containers/restart-all', { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.details || data.error || 'Failed to restart plugins');
+            }
+            setRestartAllStatus('Restarted');
+            setTimeout(() => setRestartAllStatus(null), 3000);
+            await fetchPlugins();
+        } catch (err: any) {
+            setRestartAllStatus('Failed');
+            alert(err.message);
+            setTimeout(() => setRestartAllStatus(null), 3000);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const addPlugin = async () => {
+        if (!addPluginForm.pluginId || !addPluginForm.image) {
+            alert('Plugin ID and Image are required');
+            return;
+        }
+
+        setLoading(true);
+        try {
+            const res = await fetch('/api/plugins/containers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pluginId: addPluginForm.pluginId,
+                    image: addPluginForm.image,
+                    instances: addPluginForm.instances,
+                    resources: {
+                        memory: addPluginForm.memory,
+                        cpus: parseFloat(addPluginForm.cpus) || 0.5,
+                    },
+                }),
+            });
+
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.details || data.error || 'Failed to add plugin');
+            }
+
+            setShowAddPluginModal(false);
+            setAddPluginForm({
+                pluginId: '',
+                image: '',
+                instances: 1,
+                memory: '256m',
+                cpus: '0.5',
+            });
+            await fetchPlugins();
+        } catch (err: any) {
+            alert(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const removePlugin = async (pluginId: string) => {
+        setLoading(true);
+        try {
+            const res = await fetch(`/api/plugins/containers/${pluginId}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.details || data.error || 'Failed to remove plugin');
+            }
+            setShowRemoveConfirm(null);
+            if (selectedPlugin === pluginId) {
+                setSelectedPlugin(null);
+            }
+            await fetchPlugins();
+        } catch (err: any) {
+            alert(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const selectedPluginData = pluginsData?.plugins.find(p => p.id === selectedPlugin);
 
     // Group plugins by queue assignment
@@ -202,6 +323,20 @@ function Plugins() {
             <div className="plugins-header">
                 <h1>Plugins</h1>
                 <div className="header-actions">
+                    <button
+                        className="btn btn-secondary"
+                        onClick={() => setShowAddPluginModal(true)}
+                        disabled={loading}
+                    >
+                        Add Plugin
+                    </button>
+                    <button
+                        className="btn btn-secondary"
+                        onClick={restartAllPlugins}
+                        disabled={loading}
+                    >
+                        {restartAllStatus || 'Restart All'}
+                    </button>
                     <button
                         className="btn btn-secondary"
                         onClick={rescanPlugins}
@@ -485,6 +620,14 @@ function Plugins() {
                                 <div className="action-buttons">
                                     <button
                                         className="btn btn-secondary"
+                                        onClick={() => restartPlugin(selectedPluginData.id)}
+                                        disabled={loading}
+                                        title="Restart this plugin container"
+                                    >
+                                        Restart
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary"
                                         onClick={() => clearCache(selectedPluginData.id)}
                                         disabled={loading}
                                     >
@@ -497,6 +640,14 @@ function Plugins() {
                                         title={!selectedPluginData.active ? 'Plugin must be active to recompute' : 'Re-run this plugin on all files'}
                                     >
                                         {recomputeStatus || 'Recompute All Files'}
+                                    </button>
+                                    <button
+                                        className="btn btn-danger"
+                                        onClick={() => setShowRemoveConfirm(selectedPluginData.id)}
+                                        disabled={loading}
+                                        title="Remove this plugin"
+                                    >
+                                        Remove
                                     </button>
                                 </div>
                                 <p className="action-hint">
@@ -617,6 +768,115 @@ function Plugins() {
                                     ))
                                 )}
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Add Plugin Modal */}
+            {showAddPluginModal && (
+                <div className="modal-overlay" onClick={() => setShowAddPluginModal(false)}>
+                    <div className="modal" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>Add Container Plugin</h2>
+                            <button className="modal-close" onClick={() => setShowAddPluginModal(false)}>&times;</button>
+                        </div>
+                        <div className="modal-body">
+                            <div className="form-group">
+                                <label htmlFor="pluginId">Plugin ID *</label>
+                                <input
+                                    id="pluginId"
+                                    type="text"
+                                    className="form-input"
+                                    placeholder="my-plugin"
+                                    value={addPluginForm.pluginId}
+                                    onChange={e => setAddPluginForm({ ...addPluginForm, pluginId: e.target.value })}
+                                />
+                                <span className="form-hint">Lowercase alphanumeric with hyphens (e.g., my-plugin)</span>
+                            </div>
+                            <div className="form-group">
+                                <label htmlFor="image">Docker Image *</label>
+                                <input
+                                    id="image"
+                                    type="text"
+                                    className="form-input"
+                                    placeholder="my-plugin:latest"
+                                    value={addPluginForm.image}
+                                    onChange={e => setAddPluginForm({ ...addPluginForm, image: e.target.value })}
+                                />
+                                <span className="form-hint">Docker image name and tag</span>
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group">
+                                    <label htmlFor="instances">Instances</label>
+                                    <input
+                                        id="instances"
+                                        type="number"
+                                        className="form-input"
+                                        min="1"
+                                        value={addPluginForm.instances}
+                                        onChange={e => setAddPluginForm({ ...addPluginForm, instances: parseInt(e.target.value) || 1 })}
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="memory">Memory</label>
+                                    <input
+                                        id="memory"
+                                        type="text"
+                                        className="form-input"
+                                        placeholder="256m"
+                                        value={addPluginForm.memory}
+                                        onChange={e => setAddPluginForm({ ...addPluginForm, memory: e.target.value })}
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="cpus">CPUs</label>
+                                    <input
+                                        id="cpus"
+                                        type="text"
+                                        className="form-input"
+                                        placeholder="0.5"
+                                        value={addPluginForm.cpus}
+                                        onChange={e => setAddPluginForm({ ...addPluginForm, cpus: e.target.value })}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        <div className="modal-footer">
+                            <button className="btn btn-secondary" onClick={() => setShowAddPluginModal(false)}>
+                                Cancel
+                            </button>
+                            <button className="btn btn-primary" onClick={addPlugin} disabled={loading}>
+                                {loading ? 'Adding...' : 'Add Plugin'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Remove Confirmation Dialog */}
+            {showRemoveConfirm && (
+                <div className="modal-overlay" onClick={() => setShowRemoveConfirm(null)}>
+                    <div className="modal modal-confirm" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>Remove Plugin</h2>
+                            <button className="modal-close" onClick={() => setShowRemoveConfirm(null)}>&times;</button>
+                        </div>
+                        <div className="modal-body">
+                            <p className="confirm-message">
+                                Are you sure you want to remove plugin <strong>'{showRemoveConfirm}'</strong>?
+                            </p>
+                            <p className="confirm-warning">
+                                This will stop the container and remove it from configuration.
+                            </p>
+                        </div>
+                        <div className="modal-footer">
+                            <button className="btn btn-secondary" onClick={() => setShowRemoveConfirm(null)}>
+                                Cancel
+                            </button>
+                            <button className="btn btn-danger" onClick={() => removePlugin(showRemoveConfirm)} disabled={loading}>
+                                {loading ? 'Removing...' : 'Remove'}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1252,6 +1512,149 @@ function Plugins() {
                     margin-top: 12px;
                     font-size: 0.75rem;
                     color: var(--text-secondary);
+                }
+
+                /* Modal Styles */
+                .modal-overlay {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(0, 0, 0, 0.7);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 1000;
+                }
+
+                .modal {
+                    background: var(--bg-secondary);
+                    border-radius: 12px;
+                    width: 90%;
+                    max-width: 500px;
+                    max-height: 90vh;
+                    overflow: hidden;
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+                }
+
+                .modal-confirm {
+                    max-width: 400px;
+                }
+
+                .modal-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    padding: 16px 20px;
+                    border-bottom: 1px solid var(--border-color);
+                }
+
+                .modal-header h2 {
+                    margin: 0;
+                    font-size: 1.2rem;
+                }
+
+                .modal-close {
+                    background: none;
+                    border: none;
+                    font-size: 1.5rem;
+                    color: var(--text-secondary);
+                    cursor: pointer;
+                    padding: 0;
+                    line-height: 1;
+                }
+
+                .modal-close:hover {
+                    color: var(--text-primary);
+                }
+
+                .modal-body {
+                    padding: 20px;
+                    overflow-y: auto;
+                    max-height: calc(90vh - 140px);
+                }
+
+                .modal-footer {
+                    display: flex;
+                    justify-content: flex-end;
+                    gap: 12px;
+                    padding: 16px 20px;
+                    border-top: 1px solid var(--border-color);
+                }
+
+                /* Form Styles */
+                .form-group {
+                    margin-bottom: 16px;
+                }
+
+                .form-group label {
+                    display: block;
+                    font-size: 0.9rem;
+                    font-weight: 500;
+                    margin-bottom: 6px;
+                    color: var(--text-primary);
+                }
+
+                .form-input {
+                    width: 100%;
+                    padding: 10px 12px;
+                    background: var(--bg-tertiary);
+                    border: 1px solid var(--border-color);
+                    border-radius: 6px;
+                    color: var(--text-primary);
+                    font-size: 0.95rem;
+                    box-sizing: border-box;
+                }
+
+                .form-input:focus {
+                    outline: none;
+                    border-color: var(--accent-primary);
+                }
+
+                .form-hint {
+                    display: block;
+                    font-size: 0.8rem;
+                    color: var(--text-secondary);
+                    margin-top: 4px;
+                }
+
+                .form-row {
+                    display: grid;
+                    grid-template-columns: repeat(3, 1fr);
+                    gap: 12px;
+                }
+
+                /* Confirm Dialog */
+                .confirm-message {
+                    font-size: 1rem;
+                    margin-bottom: 12px;
+                }
+
+                .confirm-warning {
+                    font-size: 0.9rem;
+                    color: var(--text-secondary);
+                }
+
+                /* Danger Button */
+                .btn-danger {
+                    background: #dc2626;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-size: 0.9rem;
+                    transition: background 0.2s;
+                }
+
+                .btn-danger:hover {
+                    background: #b91c1c;
+                }
+
+                .btn-danger:disabled {
+                    background: #7f1d1d;
+                    cursor: not-allowed;
                 }
             `}</style>
         </div>

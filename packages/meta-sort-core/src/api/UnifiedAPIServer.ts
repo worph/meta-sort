@@ -1867,6 +1867,64 @@ export class UnifiedAPIServer {
         });
       }
     });
+
+    // Clear all metadata and trigger rescan
+    this.app.post('/api/metadata/clear', async (request, reply) => {
+      if (!this.kvClient) {
+        return reply.status(503).send({
+          status: 'error',
+          message: 'KV client not available'
+        });
+      }
+
+      try {
+        console.log('Clearing all metadata via API');
+
+        // Get all file keys and delete them
+        const hashIds = await this.kvClient.getAllHashIds();
+        let deletedCount = 0;
+
+        for (const hashId of hashIds) {
+          try {
+            await this.kvClient.delete(`/file/${hashId}`);
+            deletedCount++;
+          } catch (err) {
+            console.warn(`Failed to delete key /file/${hashId}:`, err);
+          }
+        }
+
+        // Also delete the index key
+        try {
+          await this.kvClient.delete('/file/__index__');
+        } catch (err) {
+          // Index might not exist
+        }
+
+        console.log(`Cleared ${deletedCount} file metadata entries`);
+
+        // Trigger rescan if callback is available
+        if (this.triggerScanCallback) {
+          console.log('Triggering rescan after metadata clear');
+          this.triggerScanCallback().catch(error => {
+            console.error('Error during post-clear rescan:', error);
+          });
+        }
+
+        return {
+          status: 'ok',
+          message: `Cleared ${deletedCount} files`,
+          deletedCount,
+          rescanTriggered: !!this.triggerScanCallback
+        };
+      } catch (error: any) {
+        console.error('Error clearing metadata:', error);
+        return reply.status(500).send({
+          status: 'error',
+          message: 'Failed to clear metadata',
+          details: error.message
+        });
+      }
+    });
   }
 
   /**
@@ -2083,7 +2141,7 @@ export class UnifiedAPIServer {
       }
     });
 
-    // Clear plugin cache
+    // Clear plugin cache for a specific plugin
     this.app.post<{ Params: { pluginId: string } }>('/api/plugins/:pluginId/clear-cache', async (request, reply) => {
       const pluginManager = this.getPluginManager?.();
       if (!pluginManager) {
@@ -2097,6 +2155,55 @@ export class UnifiedAPIServer {
         status: 'ok',
         message: `Cache clear not applicable for container plugin ${pluginId}`
       };
+    });
+
+    // Clear all plugin caches
+    this.app.post('/api/plugins/clear-cache', async (request, reply) => {
+      try {
+        const fs = await import('fs/promises');
+        const fsSync = await import('fs');
+        const path = await import('path');
+
+        const cacheDir = path.join(config.CACHE_FOLDER_PATH, 'plugin-cache');
+
+        let deletedFiles = 0;
+        let deletedDirs = 0;
+
+        // Clear plugin cache directory
+        if (fsSync.existsSync(cacheDir)) {
+          const entries = await fs.readdir(cacheDir, { withFileTypes: true });
+          for (const entry of entries) {
+            const entryPath = path.join(cacheDir, entry.name);
+            try {
+              if (entry.isDirectory()) {
+                await fs.rm(entryPath, { recursive: true, force: true });
+                deletedDirs++;
+              } else {
+                await fs.unlink(entryPath);
+                deletedFiles++;
+              }
+            } catch (err) {
+              console.warn(`Failed to delete ${entryPath}:`, err);
+            }
+          }
+        }
+
+        console.log(`Cleared plugin cache: ${deletedDirs} directories, ${deletedFiles} files`);
+
+        return {
+          status: 'ok',
+          message: `Cleared plugin cache`,
+          deletedDirs,
+          deletedFiles
+        };
+      } catch (error: any) {
+        console.error('Error clearing plugin cache:', error);
+        return reply.status(500).send({
+          status: 'error',
+          message: 'Failed to clear plugin cache',
+          details: error.message
+        });
+      }
     });
 
     // Rescan plugins (reload from container manager)
@@ -2377,6 +2484,134 @@ export class UnifiedAPIServer {
         error: 'Log retrieval not implemented',
         message: 'Use docker logs command directly for container logs'
       });
+    });
+
+    // Add new container plugin
+    this.app.post<{
+      Body: {
+        pluginId: string;
+        image: string;
+        instances?: number;
+        resources?: { memory?: string; cpus?: number };
+        config?: Record<string, unknown>;
+        network?: boolean;
+        defaultQueue?: 'fast' | 'background';
+      }
+    }>('/api/plugins/containers', async (request, reply) => {
+      if (!this.containerManager) {
+        return reply.status(503).send({ error: 'Container manager not initialized' });
+      }
+
+      const { pluginId, image, instances, resources, config: pluginConfig, network, defaultQueue } = request.body;
+
+      if (!pluginId) {
+        return reply.status(400).send({ error: 'pluginId is required' });
+      }
+
+      if (!image) {
+        return reply.status(400).send({ error: 'image is required' });
+      }
+
+      try {
+        await this.containerManager.addPlugin(pluginId, image, {
+          instances,
+          resources,
+          config: pluginConfig,
+          network,
+          defaultQueue,
+        });
+
+        return {
+          success: true,
+          message: `Plugin '${pluginId}' added successfully`
+        };
+      } catch (error: any) {
+        return reply.status(400).send({
+          error: 'Failed to add plugin',
+          details: error.message
+        });
+      }
+    });
+
+    // Remove container plugin
+    this.app.delete<{
+      Params: { pluginId: string }
+    }>('/api/plugins/containers/:pluginId', async (request, reply) => {
+      if (!this.containerManager) {
+        return reply.status(503).send({ error: 'Container manager not initialized' });
+      }
+
+      const { pluginId } = request.params;
+
+      try {
+        await this.containerManager.removePlugin(pluginId);
+        return {
+          success: true,
+          message: `Plugin '${pluginId}' removed successfully`
+        };
+      } catch (error: any) {
+        return reply.status(500).send({
+          error: 'Failed to remove plugin',
+          details: error.message
+        });
+      }
+    });
+
+    // Update container plugin
+    this.app.put<{
+      Params: { pluginId: string };
+      Body: {
+        image?: string;
+        instances?: number;
+        resources?: { memory?: string; cpus?: number };
+        config?: Record<string, unknown>;
+        network?: boolean;
+        defaultQueue?: 'fast' | 'background';
+      }
+    }>('/api/plugins/containers/:pluginId', async (request, reply) => {
+      if (!this.containerManager) {
+        return reply.status(503).send({ error: 'Container manager not initialized' });
+      }
+
+      const { pluginId } = request.params;
+      const updates = request.body;
+
+      if (!updates || Object.keys(updates).length === 0) {
+        return reply.status(400).send({ error: 'No updates provided' });
+      }
+
+      try {
+        await this.containerManager.updatePluginConfig(pluginId, updates);
+        return {
+          success: true,
+          message: `Plugin '${pluginId}' updated successfully`
+        };
+      } catch (error: any) {
+        return reply.status(500).send({
+          error: 'Failed to update plugin',
+          details: error.message
+        });
+      }
+    });
+
+    // Restart all container plugins
+    this.app.post('/api/plugins/containers/restart-all', async (request, reply) => {
+      if (!this.containerManager) {
+        return reply.status(503).send({ error: 'Container manager not initialized' });
+      }
+
+      try {
+        await this.containerManager.restartAllPlugins();
+        return {
+          success: true,
+          message: 'All plugins restarted successfully'
+        };
+      } catch (error: any) {
+        return reply.status(500).send({
+          error: 'Failed to restart plugins',
+          details: error.message
+        });
+      }
     });
   }
 

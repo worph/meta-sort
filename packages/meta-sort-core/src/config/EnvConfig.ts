@@ -115,6 +115,17 @@ interface EnvConfig {
 
     /** Docker Compose project name for grouping containers in Docker Desktop (optional). When set, plugin containers appear grouped as a stack. */
     PLUGIN_STACK_NAME?: string;
+
+    /**
+     * Host path for plugin cache folders.
+     * This is the actual host filesystem path that plugin containers will mount.
+     * Required for persistent plugin caches across container restarts.
+     * Example: "/d/workspace/MetaMesh/meta-root-v2/dev/cache/meta-sort/plugin-cache"
+     */
+    PLUGIN_CACHE_HOST_PATH?: string;
+
+    // NOTE: Plugin output files are written via WebDAV (WEBDAV_URL/plugin/<pluginId>/)
+    // No PLUGIN_OUTPUT_HOST_PATH needed - plugins use HTTP PUT to write files
 }
 
 // Parse POLLING_PATHS from JSON string
@@ -151,15 +162,15 @@ function parsePollingPaths(): PollingPathConfig[] | undefined {
 
 export const config: EnvConfig = {
     WATCH_FOLDER_LIST: process.env.WATCH_FOLDER_LIST,
-    INDEX_FOLDER_PATH: process.env.INDEX_FOLDER_PATH || '/data/cache/hash',//default /data/cache/hash
+    INDEX_FOLDER_PATH: process.env.INDEX_FOLDER_PATH || '/data/cache/hash-index',//default /data/cache/hash-index
     UPDATE_INTERVAL_MS: parseInt(process.env.UPDATE_INTERVAL_MS || "30000", 10),//default 30000
     WATCH_FOLDER_POOLING_INTERVAL_MS: parseInt(process.env.WATCH_FOLDER_POOLING_INTERVAL_MS || "0", 10),//default 0
     CHMOD_FOR_NEW_FOLDER: process.env.CHMOD_FOR_NEW_FOLDER && parseInt(process.env.CHMOD_FOR_NEW_FOLDER, 8),//default 0o777 (this is the default for mkdir)
-    CACHE_FOLDER_PATH: process.env.CACHE_FOLDER_PATH || '/data/cache/plugins',//default /data/cache/plugins
+    CACHE_FOLDER_PATH: process.env.CACHE_FOLDER_PATH || '/data/cache',//default /data/cache
     JELLYFIN_ENDPOINT: process.env.JELLYFIN_ENDPOINT!,
     JELLYFIN_API_KEY: process.env.JELLYFIN_API_KEY!,
     FUSE_API_PORT: parseInt(process.env.FUSE_API_PORT || "3000", 10),//default 3000
-    FUSE_API_HOST: process.env.FUSE_API_HOST || 'localhost',//default localhost
+    FUSE_API_HOST: process.env.FUSE_API_HOST || '0.0.0.0',//default 0.0.0.0
     METADATA_FORMATS: (process.env.METADATA_FORMATS || 'meta').split(',').map(f => f.trim()).filter(f => f.length > 0),//default 'meta'
     MAX_WORKER_THREADS: process.env.MAX_WORKER_THREADS ? parseInt(process.env.MAX_WORKER_THREADS, 10) : undefined,
     POLLING_PATHS: parsePollingPaths(),
@@ -186,6 +197,7 @@ export const config: EnvConfig = {
     CONTAINER_NETWORK: process.env.CONTAINER_NETWORK || 'meta-network',
     PLUGIN_WEBDAV_URL: process.env.PLUGIN_WEBDAV_URL,
     PLUGIN_STACK_NAME: process.env.PLUGIN_STACK_NAME,
+    PLUGIN_CACHE_HOST_PATH: process.env.PLUGIN_CACHE_HOST_PATH,
 };
 
 if(process.env.TEST!=='true') {

@@ -329,6 +329,14 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                     midHash256 = await computeMidHash256(filePath);
                     performanceMetrics.recordHashComputation('cid_midhash256', Math.ceil(performance.now() - computeStart));
                     performanceMetrics.recordCacheMiss('midhash256');
+
+                    // Store in cache for future lookups
+                    (this.fileProcessor as any).indexManager?.addFileCid(
+                        filePath,
+                        fileStats.size,
+                        fileStats.mtime.toISOString(),
+                        { cid_midhash256: midHash256 }
+                    );
                 }
 
                 // STEP 2: Initialize metadata with midhash256

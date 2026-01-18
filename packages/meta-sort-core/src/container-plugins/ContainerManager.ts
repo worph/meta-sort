@@ -6,10 +6,12 @@
  */
 
 import { EventEmitter } from 'events';
+import { promises as fs } from 'fs';
 import { DockerClient } from './DockerClient.js';
 import {
     loadConfig,
     getEnabledPlugins,
+    saveConfig,
 } from './ConfigParser.js';
 import type {
     ContainerPluginsConfig,
@@ -298,8 +300,40 @@ export class ContainerManager extends EventEmitter {
          *   Sees all mounts including SMB via rclone
          *
          * Note: No volume mounts for /files - plugins use HTTP/WebDAV client
+         * Cache: Each plugin gets a dedicated cache folder mounted at /cache
          */
         const mounts: Array<{ source: string; target: string; readonly: boolean }> = [];
+
+        // Add cache mount for plugin persistence (survives container restarts)
+        // Use PLUGIN_CACHE_HOST_PATH if set (host filesystem path for Docker bind mounts)
+        // Otherwise fall back to internal path (only works if container shares filesystem)
+        if (config.PLUGIN_CACHE_HOST_PATH) {
+            const pluginCacheDir = `${config.PLUGIN_CACHE_HOST_PATH}/${pluginId}`;
+            // Create directory on internal path (which maps to host path)
+            const internalCacheDir = `${config.CACHE_FOLDER_PATH}/plugin-cache/${pluginId}`;
+            await fs.mkdir(internalCacheDir, { recursive: true });
+            mounts.push({
+                source: pluginCacheDir,
+                target: '/cache',
+                readonly: false,
+            });
+        } else {
+            console.warn(`[ContainerManager] PLUGIN_CACHE_HOST_PATH not set. Plugin '${pluginId}' cache will not persist across restarts.`);
+        }
+
+        // NOTE: Plugin output files are written via WebDAV (WEBDAV_URL/plugin/<pluginId>/)
+        // No output mount needed - plugins use HTTP PUT to write files
+
+        // Add any additional mounts from plugin config
+        if (pluginConfig.mounts) {
+            for (const mount of pluginConfig.mounts) {
+                mounts.push({
+                    source: mount.source,
+                    target: mount.target,
+                    readonly: mount.readonly ?? true,
+                });
+            }
+        }
 
         // No file mounts needed - plugins access files via WebDAV
         if (!this.webdavUrl) {
@@ -686,6 +720,199 @@ export class ContainerManager extends EventEmitter {
         } else {
             instance.tasksFailed++;
         }
+    }
+
+    /**
+     * Add a new plugin dynamically
+     */
+    async addPlugin(
+        pluginId: string,
+        image: string,
+        pluginConfig?: Partial<ContainerPluginConfig>
+    ): Promise<void> {
+        // Validate plugin ID format
+        if (!/^[a-z][a-z0-9-]*$/.test(pluginId)) {
+            throw new Error(
+                `Invalid plugin ID '${pluginId}': must be lowercase alphanumeric with hyphens, starting with a letter`
+            );
+        }
+
+        // Check if plugin already exists
+        if (this.instances.has(pluginId)) {
+            throw new Error(`Plugin '${pluginId}' already exists`);
+        }
+
+        console.log(`[ContainerManager] Adding new plugin '${pluginId}' with image '${image}'`);
+
+        // Build full plugin config
+        const fullConfig: ContainerPluginConfig = {
+            enabled: pluginConfig?.enabled !== false,
+            image,
+            instances: pluginConfig?.instances ?? 1,
+            resources: pluginConfig?.resources,
+            config: pluginConfig?.config,
+            network: pluginConfig?.network ?? false,
+            mounts: pluginConfig?.mounts,
+            healthCheck: pluginConfig?.healthCheck,
+            defaultQueue: pluginConfig?.defaultQueue,
+        };
+
+        // Update in-memory config
+        if (!this.pluginsConfig) {
+            this.pluginsConfig = { version: '1.0', plugins: {} };
+        }
+        this.pluginsConfig.plugins[pluginId] = fullConfig;
+
+        // Save to YAML file
+        await saveConfig(this.configPath, this.pluginsConfig);
+
+        // Spawn the plugin containers
+        if (fullConfig.enabled) {
+            await this.spawnPlugin(pluginId, fullConfig);
+        }
+
+        console.log(`[ContainerManager] Plugin '${pluginId}' added successfully`);
+    }
+
+    /**
+     * Remove a plugin
+     */
+    async removePlugin(pluginId: string): Promise<void> {
+        console.log(`[ContainerManager] Removing plugin '${pluginId}'...`);
+
+        const instances = this.instances.get(pluginId);
+
+        if (instances) {
+            // Stop health check
+            const interval = this.healthCheckIntervals.get(pluginId);
+            if (interval) {
+                clearInterval(interval);
+                this.healthCheckIntervals.delete(pluginId);
+            }
+
+            // Stop all instances
+            for (const instance of instances) {
+                await this.stopInstance(instance);
+            }
+
+            this.instances.delete(pluginId);
+        }
+
+        // Remove from config
+        if (this.pluginsConfig && this.pluginsConfig.plugins[pluginId]) {
+            delete this.pluginsConfig.plugins[pluginId];
+
+            // Save to YAML file
+            await saveConfig(this.configPath, this.pluginsConfig);
+        }
+
+        // Reset round robin counter
+        this.roundRobinCounters.delete(pluginId);
+
+        console.log(`[ContainerManager] Plugin '${pluginId}' removed successfully`);
+    }
+
+    /**
+     * Restart all plugins
+     */
+    async restartAllPlugins(): Promise<void> {
+        console.log('[ContainerManager] Restarting all plugins...');
+
+        const pluginIds = Array.from(this.instances.keys());
+
+        for (const pluginId of pluginIds) {
+            try {
+                await this.restartPlugin(pluginId);
+            } catch (error) {
+                console.error(`[ContainerManager] Failed to restart plugin '${pluginId}':`, error);
+            }
+        }
+
+        console.log('[ContainerManager] All plugins restarted');
+    }
+
+    /**
+     * Update plugin image and restart
+     */
+    async updatePluginImage(pluginId: string, newImage: string): Promise<void> {
+        console.log(`[ContainerManager] Updating plugin '${pluginId}' to image '${newImage}'...`);
+
+        const pluginConfig = this.pluginsConfig?.plugins[pluginId];
+
+        if (!pluginConfig) {
+            throw new Error(`Plugin '${pluginId}' not found`);
+        }
+
+        // Update image in config
+        pluginConfig.image = newImage;
+
+        // Save to YAML file
+        if (this.pluginsConfig) {
+            await saveConfig(this.configPath, this.pluginsConfig);
+        }
+
+        // Restart the plugin to use the new image
+        await this.restartPlugin(pluginId);
+
+        console.log(`[ContainerManager] Plugin '${pluginId}' updated successfully`);
+    }
+
+    /**
+     * Update plugin configuration
+     */
+    async updatePluginConfig(
+        pluginId: string,
+        updates: Partial<ContainerPluginConfig>
+    ): Promise<void> {
+        console.log(`[ContainerManager] Updating configuration for plugin '${pluginId}'...`);
+
+        const pluginConfig = this.pluginsConfig?.plugins[pluginId];
+
+        if (!pluginConfig) {
+            throw new Error(`Plugin '${pluginId}' not found`);
+        }
+
+        // Apply updates
+        if (updates.image !== undefined) {
+            pluginConfig.image = updates.image;
+        }
+        if (updates.instances !== undefined) {
+            pluginConfig.instances = updates.instances;
+        }
+        if (updates.resources !== undefined) {
+            pluginConfig.resources = updates.resources;
+        }
+        if (updates.config !== undefined) {
+            pluginConfig.config = updates.config;
+        }
+        if (updates.enabled !== undefined) {
+            pluginConfig.enabled = updates.enabled;
+        }
+        if (updates.network !== undefined) {
+            pluginConfig.network = updates.network;
+        }
+        if (updates.defaultQueue !== undefined) {
+            pluginConfig.defaultQueue = updates.defaultQueue;
+        }
+
+        // Save to YAML file
+        if (this.pluginsConfig) {
+            await saveConfig(this.configPath, this.pluginsConfig);
+        }
+
+        // Restart the plugin to apply changes
+        if (this.instances.has(pluginId)) {
+            await this.restartPlugin(pluginId);
+        }
+
+        console.log(`[ContainerManager] Plugin '${pluginId}' configuration updated`);
+    }
+
+    /**
+     * Get the current plugins configuration
+     */
+    getPluginsConfig(): ContainerPluginsConfig | null {
+        return this.pluginsConfig;
     }
 }
 
