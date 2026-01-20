@@ -273,7 +273,7 @@ export class StreamingPipeline {
      * Stage 3: Background Queue Phase
      * - Compute full hashes (SHA-256, SHA-1, MD5, CRC32)
      * - Update KV with additional hash metadata
-     * - Mark processing as complete
+     * - Mark processing as complete (if no container plugins)
      */
     private async processHashPhase(filePath: string): Promise<void> {
         try {
@@ -284,6 +284,20 @@ export class StreamingPipeline {
             await this.config.fileProcessor.processHashPhase(filePath, current, queueSize);
 
             this.backgroundProcessedCount++;
+
+            // If container plugins are NOT configured, mark file as complete immediately.
+            // Otherwise, wait for 'file:complete' event from ContainerPluginScheduler.
+            if (!this.config.containerPluginScheduler) {
+                const metadata = this.config.fileProcessor.getDatabase().get(filePath);
+                const hashId = metadata?.cid_midhash256;
+                let virtualPath: string | undefined;
+                try {
+                    virtualPath = metadata ? this.config.metaDataToFolderStruct.renamingRule(metadata as any, filePath) : undefined;
+                } catch {
+                    // Renaming rule may fail for incomplete metadata
+                }
+                this.config.stateManager.completeHashProcessing(filePath, hashId, virtualPath);
+            }
         } catch (error: any) {
             // Processing failed - mark as failed (manual retry available via UI)
             console.error(`[Pipeline] Background queue processing failed for ${filePath}: ${error.message}`);
@@ -346,6 +360,30 @@ export class StreamingPipeline {
      * Get pipeline statistics
      */
     getStats() {
+        // Get container scheduler queue status if available
+        const containerScheduler = this.config.containerPluginScheduler;
+        const containerQueueStatus = containerScheduler?.getQueueStatus();
+
+        // Use container scheduler queues for fast/background if available
+        // The container scheduler manages the actual plugin task execution
+        // PQueue: .pending = running + waiting, .size = waiting only
+        // So running = pending - size (but ensure non-negative)
+        const fastQueue = containerQueueStatus ? {
+            pending: Math.max(0, containerQueueStatus.fast.running), // running jobs
+            size: Math.max(0, containerQueueStatus.fast.pending) // total pending (running + waiting)
+        } : {
+            pending: this.fastQueue.pending,
+            size: this.fastQueue.size
+        };
+
+        const backgroundQueue = containerQueueStatus ? {
+            pending: Math.max(0, containerQueueStatus.background.running), // running jobs
+            size: Math.max(0, containerQueueStatus.background.pending) // total pending
+        } : {
+            pending: this.backgroundQueue.pending,
+            size: this.backgroundQueue.size
+        };
+
         return {
             discovered: this.discoveredCount,
             validated: this.validatedCount,
@@ -356,14 +394,8 @@ export class StreamingPipeline {
                     pending: this.validationQueue.pending,
                     size: this.validationQueue.size
                 },
-                fastQueue: {
-                    pending: this.fastQueue.pending,
-                    size: this.fastQueue.size
-                },
-                backgroundQueue: {
-                    pending: this.backgroundQueue.pending,
-                    size: this.backgroundQueue.size
-                }
+                fastQueue,
+                backgroundQueue
             },
             state: this.config.stateManager.getSnapshot()
         };
@@ -491,6 +523,26 @@ export class StreamingPipeline {
      */
     setContainerPluginScheduler(scheduler: import('../../container-plugins/ContainerPluginScheduler.js').ContainerPluginScheduler): void {
         (this.config as any).containerPluginScheduler = scheduler;
+
+        // Listen for file:complete events to transition files to done state
+        scheduler.on('file:complete', ({ fileHash, filePath }) => {
+            console.log(`[Pipeline] Container plugins complete for ${filePath} (${fileHash})`);
+
+            // Get virtual path from metadata if available
+            let virtualPath: string | undefined;
+            const metadata = this.config.fileProcessor?.getDatabase().get(filePath);
+            if (metadata) {
+                try {
+                    virtualPath = this.config.metaDataToFolderStruct.renamingRule(metadata as any, filePath);
+                } catch {
+                    // Renaming rule may fail for incomplete metadata
+                }
+            }
+
+            // Transition file to done state
+            this.config.stateManager.completeHashProcessing(filePath, fileHash, virtualPath);
+        });
+
         console.log('[Pipeline] Container plugin scheduler connected');
     }
 

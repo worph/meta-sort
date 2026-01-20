@@ -405,12 +405,16 @@ export class PluginManager extends EventEmitter {
     }
 
     private async saveState(): Promise<void> {
-        const state: PluginState = { plugins: {} };
+        // Load existing state to preserve config for plugins that aren't currently loaded
+        // This prevents config loss when plugins fail to initialize
+        const existingState = await this.loadState();
+        const state: PluginState = { plugins: { ...existingState.plugins } };
 
+        // Update state for currently loaded plugins
         this.manifests.forEach((_, pluginId) => {
             state.plugins[pluginId] = {
                 active: this.activePluginIds.has(pluginId),
-                config: this.configs.get(pluginId) || {},
+                config: this.configs.get(pluginId) || state.plugins[pluginId]?.config || {},
             };
         });
 

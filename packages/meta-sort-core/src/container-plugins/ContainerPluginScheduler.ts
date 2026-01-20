@@ -76,7 +76,6 @@ export class ContainerPluginScheduler extends EventEmitter {
         containerManager: ContainerManager,
         options?: {
             fastConcurrency?: number;
-            backgroundConcurrency?: number;
             callbackUrl?: string;
             metaCoreUrl?: string;
             defaultTimeout?: number;
@@ -91,8 +90,9 @@ export class ContainerPluginScheduler extends EventEmitter {
         });
 
         // Background queue starts paused - only runs when fast queue is idle
+        // Concurrency is unlimited - actual limit is determined by plugin instances
         this.backgroundQueue = new PQueue({
-            concurrency: options?.backgroundConcurrency ?? config.BACKGROUND_QUEUE_CONCURRENCY,
+            concurrency: Infinity,
             autoStart: false,
         });
 
@@ -285,6 +285,7 @@ export class ContainerPluginScheduler extends EventEmitter {
      * Called when fast queue becomes idle - start background queue if it has work
      */
     private onFastQueueIdle(): void {
+        console.log(`[ContainerScheduler] onFastQueueIdle: bgQueue.size=${this.backgroundQueue.size}, bgQueue.pending=${this.backgroundQueue.pending}, bgQueue.isPaused=${this.backgroundQueue.isPaused}`);
         if (this.backgroundQueue.size > 0 || this.backgroundQueue.pending > 0) {
             console.log('[ContainerScheduler] Fast queue idle, starting background queue');
             this.backgroundQueue.start();
@@ -295,6 +296,8 @@ export class ContainerPluginScheduler extends EventEmitter {
      * Execute a task (dispatch to container)
      */
     private async executeTask(task: ContainerTask): Promise<void> {
+        console.log(`[ContainerScheduler] executeTask: ${task.pluginId} for ${task.fileHash} (queue: ${task.queue})`);
+
         // Wait for dependencies to complete first
         if (task.dependencies && task.dependencies.length > 0) {
             task.status = 'waiting';
@@ -302,6 +305,7 @@ export class ContainerPluginScheduler extends EventEmitter {
         }
 
         const instance = this.containerManager.getHealthyInstance(task.pluginId);
+        console.log(`[ContainerScheduler] getHealthyInstance(${task.pluginId}): ${instance ? instance.containerName : 'null'}`);
 
         if (!instance) {
             task.status = 'failed';
@@ -320,7 +324,9 @@ export class ContainerPluginScheduler extends EventEmitter {
         try {
             // Fetch fresh metadata after dependencies complete
             // This ensures we get metadata written by dependency plugins
+            console.log(`[ContainerScheduler] Fetching metadata for ${task.fileHash}...`);
             const existingMeta = await this.fetchExistingMetadata(task.fileHash);
+            console.log(`[ContainerScheduler] Dispatching to ${instance.baseUrl}/process for ${task.pluginId}`);
 
             // Build process request
             const request: PluginProcessRequest = {
@@ -334,6 +340,7 @@ export class ContainerPluginScheduler extends EventEmitter {
 
             // Dispatch to container
             const response = await this.dispatchToContainer(instance.baseUrl, request);
+            console.log(`[ContainerScheduler] dispatchToContainer result for ${task.pluginId}: ${response.status}`);
 
             if (response.status !== 'accepted') {
                 throw new Error(response.error || 'Task rejected by plugin');
@@ -346,6 +353,7 @@ export class ContainerPluginScheduler extends EventEmitter {
             await this.waitForCallback(task, timeout);
 
         } catch (error) {
+            console.error(`[ContainerScheduler] Task ${task.pluginId} failed:`, error);
             task.status = 'failed';
             task.error = error instanceof Error ? error.message : String(error);
             task.completedAt = Date.now();
@@ -489,14 +497,18 @@ export class ContainerPluginScheduler extends EventEmitter {
      */
     private checkFileCompletion(fileHash: string): void {
         const taskIds = this.fileTasks.get(fileHash);
-        if (!taskIds) return;
+        if (!taskIds) {
+            return;
+        }
 
         let allComplete = true;
         let filePath: string | undefined;
 
         for (const taskId of taskIds) {
             const task = this.pendingTasks.get(taskId);
-            if (!task) continue;
+            if (!task) {
+                continue;
+            }
 
             filePath = task.filePath;
 
@@ -553,21 +565,38 @@ export class ContainerPluginScheduler extends EventEmitter {
 
     /**
      * Get queue status
+     * PQueue: .pending = running + waiting, .size = waiting only
      */
     getQueueStatus(): {
-        fast: { pending: number; running: number };
-        background: { pending: number; running: number };
+        fast: { pending: number; running: number; waiting: number };
+        background: { pending: number; running: number; waiting: number };
         pendingTasks: number;
         pendingCallbacks: number;
     } {
+        // Count pending callbacks by queue type
+        // These are tasks dispatched to containers awaiting completion - the real "running" count
+        let fastCallbacks = 0;
+        let backgroundCallbacks = 0;
+        for (const callback of this.pendingCallbacks.values()) {
+            if (callback.task.queue === 'fast') {
+                fastCallbacks++;
+            } else {
+                backgroundCallbacks++;
+            }
+        }
+
+        // PQueue .size = waiting in queue, .pending = running + waiting
+        // But PQueue "running" is just dispatching HTTP requests - actual running is callbacks
         return {
             fast: {
-                pending: this.fastQueue.pending,
-                running: this.fastQueue.pending - this.fastQueue.size,
+                pending: this.fastQueue.size + fastCallbacks, // waiting + running in containers
+                running: fastCallbacks, // tasks running in containers
+                waiting: this.fastQueue.size,
             },
             background: {
-                pending: this.backgroundQueue.pending,
-                running: this.backgroundQueue.pending - this.backgroundQueue.size,
+                pending: this.backgroundQueue.size + backgroundCallbacks, // waiting + running in containers
+                running: backgroundCallbacks, // tasks running in containers
+                waiting: this.backgroundQueue.size,
             },
             pendingTasks: this.pendingTasks.size,
             pendingCallbacks: this.pendingCallbacks.size,
@@ -794,7 +823,6 @@ export function createContainerPluginScheduler(
     containerManager: ContainerManager,
     options?: {
         fastConcurrency?: number;
-        backgroundConcurrency?: number;
         callbackUrl?: string;
         metaCoreUrl?: string;
         kvClient?: IKVClient;

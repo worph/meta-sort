@@ -56,6 +56,7 @@ export class TaskScheduler extends EventEmitter {
     private completedTasks: Set<string> = new Set();
     private fileTasks: Map<string, Set<string>> = new Map(); // fileHash -> taskIds
     private fileKVStores: Map<string, PluginKVStore> = new Map(); // fileHash -> KV store
+    private filePathsMap: Map<string, string> = new Map(); // fileHash -> filePath (for completion tracking)
 
     // Container plugin support
     private containerPluginScheduler: ContainerPluginScheduler | null = null;
@@ -156,6 +157,9 @@ export class TaskScheduler extends EventEmitter {
             this.fileTasks.set(fileHash, new Set());
         }
         const fileTaskIds = this.fileTasks.get(fileHash)!;
+
+        // Track filePath for completion events
+        this.filePathsMap.set(fileHash, filePath);
 
         // Store KV for this file (create new if not provided)
         if (!this.fileKVStores.has(fileHash)) {
@@ -391,7 +395,9 @@ export class TaskScheduler extends EventEmitter {
 
     private checkFileComplete(fileHash: string): void {
         const fileTaskIds = this.fileTasks.get(fileHash);
-        if (!fileTaskIds) return;
+        if (!fileTaskIds) {
+            return;
+        }
 
         // Check if all tasks for this file are completed
         let filePath = '';
@@ -399,11 +405,16 @@ export class TaskScheduler extends EventEmitter {
             if (!this.completedTasks.has(taskId)) {
                 return; // Still have pending/running tasks
             }
-            // Try to get filePath from any task
+            // Try to get filePath from any task (might be in pendingTasks if not yet removed)
             if (!filePath) {
                 const task = this.pendingTasks.get(taskId);
                 if (task) filePath = task.filePath;
             }
+        }
+
+        // Try to get filePath from file paths map if not found
+        if (!filePath) {
+            filePath = this.filePathsMap.get(fileHash) || '';
         }
 
         // All tasks complete
@@ -416,6 +427,7 @@ export class TaskScheduler extends EventEmitter {
         // Clean up file tracking
         this.fileTasks.delete(fileHash);
         this.fileKVStores.delete(fileHash);
+        this.filePathsMap.delete(fileHash);
 
         // Clean up completed task IDs for this file to prevent memory leak
         for (const taskId of fileTaskIds) {

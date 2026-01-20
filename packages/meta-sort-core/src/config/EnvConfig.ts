@@ -83,9 +83,6 @@ interface EnvConfig {
     /** Concurrency for fast plugin queue. Default: 32 */
     FAST_QUEUE_CONCURRENCY: number;
 
-    /** Concurrency for background plugin queue. Default: 8 */
-    BACKGROUND_QUEUE_CONCURRENCY: number;
-
     // ========================================================================
     // Container Plugins Configuration
     // All plugins run as Docker containers for isolation and flexibility
@@ -187,7 +184,6 @@ export const config: EnvConfig = {
 
     // TaskScheduler Configuration
     FAST_QUEUE_CONCURRENCY: parseInt(process.env.FAST_QUEUE_CONCURRENCY || "32", 10),
-    BACKGROUND_QUEUE_CONCURRENCY: parseInt(process.env.BACKGROUND_QUEUE_CONCURRENCY || "8", 10),
 
     // Container Plugins Configuration
     CONTAINER_PLUGINS_CONFIG: process.env.CONTAINER_PLUGINS_CONFIG || '/app/plugins.yml',

@@ -198,7 +198,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         const pluginManager = await initializePluginManager();
         this.taskScheduler = createTaskScheduler(pluginManager, performanceMetrics, {
             fastQueueConcurrency: config.FAST_QUEUE_CONCURRENCY,
-            backgroundQueueConcurrency: config.BACKGROUND_QUEUE_CONCURRENCY,
         });
 
         // Set up event listeners for VFS updates
@@ -206,7 +205,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
 
         console.log(`[WatchedFileProcessor] TaskScheduler initialized with:`);
         console.log(`  - Fast queue concurrency: ${config.FAST_QUEUE_CONCURRENCY}`);
-        console.log(`  - Background queue concurrency: ${config.BACKGROUND_QUEUE_CONCURRENCY}`);
     }
 
     /**

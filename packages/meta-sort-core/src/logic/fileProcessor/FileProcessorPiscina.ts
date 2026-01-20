@@ -521,14 +521,10 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 }
             }
 
-            // STATE: Hash processing complete, move to done
-            if (this.unifiedStateManager) {
-                this.unifiedStateManager.completeHashProcessing(
-                    filePath,
-                    midHash256,
-                    virtualPath
-                );
-            }
+            // NOTE: File completion is handled by StreamingPipeline based on whether
+            // container plugins are configured. If container plugins exist, we wait for
+            // the 'file:complete' event from ContainerPluginScheduler. If not, StreamingPipeline
+            // calls completeHashProcessing() directly after this method returns.
         } catch (e) {
             // Handle abort errors gracefully
             if (e instanceof Error && (e.message === 'AbortError' || e.name === 'AbortError')) {

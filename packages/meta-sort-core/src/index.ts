@@ -205,7 +205,7 @@ process.on('SIGINT', async () => {
             port: config.FUSE_API_PORT,
             host: config.FUSE_API_HOST,
             enableCors: true,
-        }, unifiedStateManager, getDuplicateResult, kvClient || undefined, triggerScan, backgroundQueueConcurrency, fastQueueConcurrency, () => fileProcessor.getQueueStatus(), kvManager || undefined, getPluginManagerInstance, () => fileProcessor.getTaskScheduler());
+        }, unifiedStateManager, getDuplicateResult, kvClient || undefined, triggerScan, undefined, fastQueueConcurrency, () => fileProcessor.getQueueStatus(), kvManager || undefined, getPluginManagerInstance, () => fileProcessor.getTaskScheduler());
 
         await apiServer.start();
         console.log('Unified API Server started successfully');
@@ -229,7 +229,6 @@ process.on('SIGINT', async () => {
                 // Create container plugin scheduler
                 containerPluginScheduler = new ContainerPluginScheduler(containerManager, {
                     fastConcurrency: config.FAST_QUEUE_CONCURRENCY,
-                    backgroundConcurrency: config.BACKGROUND_QUEUE_CONCURRENCY,
                     kvClient: kvClient || undefined,
                 });
 
