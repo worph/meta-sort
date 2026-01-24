@@ -147,7 +147,9 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                     pending: queues.backgroundQueue.size, // waiting in queue
                     size: queues.backgroundQueue.size,
                     isPaused: false
-                }
+                },
+                // File-level counts (what users care about)
+                files: queues.files
             };
             return result;
         }

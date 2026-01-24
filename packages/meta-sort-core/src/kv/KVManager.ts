@@ -135,7 +135,10 @@ export class KVManager {
             console.log(`[KVManager] Using direct Redis URL: ${this.config.redisUrl}`);
             this.kvClient = await this.createRedisClient(this.config.redisUrl);
 
-            // Initialize service discovery even with direct Redis URL
+            // NOTE: Service discovery is handled by Go meta-core sidecar
+            // The Go binary writes to /meta-core/services/{serviceName}.json with correct internal IPs
+            // TypeScript ServiceDiscovery would overwrite with external BASE_URL, breaking internal discovery
+            // Keep ServiceDiscovery instance for reading/discovery only, but don't call start()
             const apiUrl = this.config.baseUrl || `http://localhost:${this.config.apiPort}`;
             this.serviceDiscovery = new ServiceDiscovery({
                 metaCorePath: this.config.metaCorePath,
@@ -151,7 +154,8 @@ export class KVManager {
                     processing: '/api/processing/status'
                 }
             });
-            await this.serviceDiscovery.start();
+            // Don't call start() - Go meta-core handles registration
+            // await this.serviceDiscovery.start();
 
             this.isStarted = true;
             this.notifyReady();

@@ -76,6 +76,7 @@ export class ContainerPluginScheduler extends EventEmitter {
         containerManager: ContainerManager,
         options?: {
             fastConcurrency?: number;
+            backgroundConcurrency?: number;
             callbackUrl?: string;
             metaCoreUrl?: string;
             defaultTimeout?: number;
@@ -90,9 +91,9 @@ export class ContainerPluginScheduler extends EventEmitter {
         });
 
         // Background queue starts paused - only runs when fast queue is idle
-        // Concurrency is unlimited - actual limit is determined by plugin instances
+        // Default to same concurrency as fast queue if not specified
         this.backgroundQueue = new PQueue({
-            concurrency: Infinity,
+            concurrency: options?.backgroundConcurrency ?? config.FAST_QUEUE_CONCURRENCY,
             autoStart: false,
         });
 
@@ -101,10 +102,30 @@ export class ContainerPluginScheduler extends EventEmitter {
             this.onFastQueueIdle();
         });
 
+        // Initialize with env vars as fallback (will be updated from ContainerManager after discovery)
         this.callbackUrl = options?.callbackUrl ?? `${config.CONTAINER_CALLBACK_URL}/api/plugins/callback`;
         this.metaCoreUrl = options?.metaCoreUrl ?? config.CONTAINER_META_CORE_URL;
         this.defaultTimeout = options?.defaultTimeout ?? 60000;
         this.kvClient = options?.kvClient ?? null;
+    }
+
+    /**
+     * Update URLs from ContainerManager after service discovery
+     * Call this after ContainerManager.initialize() completes
+     */
+    updateUrlsFromManager(): void {
+        const managerCallbackUrl = this.containerManager.getCallbackUrl();
+        const managerMetaCoreUrl = this.containerManager.getMetaCoreUrl();
+
+        if (managerCallbackUrl) {
+            this.callbackUrl = managerCallbackUrl;
+            console.log(`[ContainerPluginScheduler] Updated callback URL: ${this.callbackUrl}`);
+        }
+
+        if (managerMetaCoreUrl) {
+            this.metaCoreUrl = managerMetaCoreUrl;
+            console.log(`[ContainerPluginScheduler] Updated meta-core URL: ${this.metaCoreUrl}`);
+        }
     }
 
     /**
@@ -572,16 +593,47 @@ export class ContainerPluginScheduler extends EventEmitter {
         background: { pending: number; running: number; waiting: number };
         pendingTasks: number;
         pendingCallbacks: number;
+        // File-level counts (what users care about)
+        files: {
+            fastRunning: number;      // unique files with fast tasks running
+            fastWaiting: number;      // unique files with fast tasks waiting
+            backgroundRunning: number; // unique files with background tasks running
+            backgroundWaiting: number; // unique files with background tasks waiting
+        };
     } {
         // Count pending callbacks by queue type
         // These are tasks dispatched to containers awaiting completion - the real "running" count
         let fastCallbacks = 0;
         let backgroundCallbacks = 0;
+        const fastRunningFiles = new Set<string>();
+        const backgroundRunningFiles = new Set<string>();
+
         for (const callback of this.pendingCallbacks.values()) {
             if (callback.task.queue === 'fast') {
                 fastCallbacks++;
+                fastRunningFiles.add(callback.task.fileHash);
             } else {
                 backgroundCallbacks++;
+                backgroundRunningFiles.add(callback.task.fileHash);
+            }
+        }
+
+        // Count unique files with waiting tasks
+        const fastWaitingFiles = new Set<string>();
+        const backgroundWaitingFiles = new Set<string>();
+
+        for (const task of this.pendingTasks.values()) {
+            if (task.status === 'pending') {
+                if (task.queue === 'fast') {
+                    // Only count as waiting if not already running
+                    if (!fastRunningFiles.has(task.fileHash)) {
+                        fastWaitingFiles.add(task.fileHash);
+                    }
+                } else {
+                    if (!backgroundRunningFiles.has(task.fileHash)) {
+                        backgroundWaitingFiles.add(task.fileHash);
+                    }
+                }
             }
         }
 
@@ -600,6 +652,12 @@ export class ContainerPluginScheduler extends EventEmitter {
             },
             pendingTasks: this.pendingTasks.size,
             pendingCallbacks: this.pendingCallbacks.size,
+            files: {
+                fastRunning: fastRunningFiles.size,
+                fastWaiting: fastWaitingFiles.size,
+                backgroundRunning: backgroundRunningFiles.size,
+                backgroundWaiting: backgroundWaitingFiles.size,
+            },
         };
     }
 
@@ -823,6 +881,7 @@ export function createContainerPluginScheduler(
     containerManager: ContainerManager,
     options?: {
         fastConcurrency?: number;
+        backgroundConcurrency?: number;
         callbackUrl?: string;
         metaCoreUrl?: string;
         kvClient?: IKVClient;

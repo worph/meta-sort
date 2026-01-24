@@ -395,7 +395,9 @@ export class StreamingPipeline {
                     size: this.validationQueue.size
                 },
                 fastQueue,
-                backgroundQueue
+                backgroundQueue,
+                // File-level counts from container scheduler (what users care about)
+                files: containerQueueStatus?.files
             },
             state: this.config.stateManager.getSnapshot()
         };

@@ -7,6 +7,7 @@
 
 import { EventEmitter } from 'events';
 import { promises as fs } from 'fs';
+import { join } from 'path';
 import { DockerClient } from './DockerClient.js';
 import {
     loadConfig,
@@ -24,6 +25,15 @@ import type {
     PluginConfigureResponse,
 } from './types.js';
 import { config } from '../config/EnvConfig.js';
+
+/**
+ * Service info structure from meta-core service discovery
+ */
+interface ServiceInfo {
+    name: string;
+    api: string;
+    endpoints: Record<string, string>;
+}
 
 /**
  * Container manager events
@@ -84,23 +94,76 @@ export class ContainerManager extends EventEmitter {
     private shutdownInProgress: boolean = false;
     private webdavUrl?: string;
     private stackName?: string;
+    private callbackUrl: string;
+    private metaCoreUrl: string;
 
     constructor(
         private configPath: string = config.CONTAINER_PLUGINS_CONFIG,
         private network: string = config.CONTAINER_NETWORK,
         private filesPath: string = config.FILES_PATH,
-        private callbackUrl: string = config.CONTAINER_CALLBACK_URL,
-        private metaCoreUrl: string = config.CONTAINER_META_CORE_URL,
+        callbackUrl?: string,
+        metaCoreUrl?: string,
         dockerClient?: DockerClient
     ) {
         super();
         this.dockerClient = dockerClient || new DockerClient(config.DOCKER_SOCKET_PATH);
 
-        // WebDAV configuration for plugin file access
+        // Initialize with env vars as fallback (will be overridden by service discovery)
+        this.callbackUrl = callbackUrl ?? config.CONTAINER_CALLBACK_URL;
+        this.metaCoreUrl = metaCoreUrl ?? config.CONTAINER_META_CORE_URL;
         this.webdavUrl = config.PLUGIN_WEBDAV_URL;
 
         // Configure stack name for Docker Desktop grouping
         this.stackName = config.PLUGIN_STACK_NAME;
+    }
+
+    /**
+     * Discover service URLs from meta-core service discovery file
+     * Falls back to environment variables if discovery fails
+     */
+    private async discoverServiceUrls(): Promise<void> {
+        const serviceFile = join(config.META_CORE_PATH, 'services', 'meta-sort.json');
+
+        try {
+            const content = await fs.readFile(serviceFile, 'utf-8');
+            const serviceInfo: ServiceInfo = JSON.parse(content);
+
+            // Extract URLs from service info
+            const api = serviceInfo.api;
+            const endpoints = serviceInfo.endpoints || {};
+
+            // Update URLs from service discovery
+            if (endpoints.callback) {
+                this.callbackUrl = endpoints.callback;
+                console.log(`[ContainerManager] Discovered callback URL: ${this.callbackUrl}`);
+            } else if (api) {
+                // Fallback: construct from api base
+                this.callbackUrl = `${api}/api/plugins/callback`;
+                console.log(`[ContainerManager] Constructed callback URL: ${this.callbackUrl}`);
+            }
+
+            if (endpoints.webdav) {
+                this.webdavUrl = endpoints.webdav;
+                console.log(`[ContainerManager] Discovered WebDAV URL: ${this.webdavUrl}`);
+            } else if (api) {
+                // Fallback: construct from api base
+                this.webdavUrl = `${api}/webdav`;
+                console.log(`[ContainerManager] Constructed WebDAV URL: ${this.webdavUrl}`);
+            }
+
+            if (endpoints.health) {
+                // Extract meta-core URL from health endpoint
+                const healthUrl = new URL(endpoints.health);
+                this.metaCoreUrl = `${healthUrl.protocol}//${healthUrl.host}`;
+                console.log(`[ContainerManager] Discovered meta-core URL: ${this.metaCoreUrl}`);
+            }
+
+            console.log('[ContainerManager] Service discovery successful');
+        } catch (error) {
+            console.warn(`[ContainerManager] Service discovery failed, using env vars: ${error}`);
+            console.log(`[ContainerManager] Using fallback callback URL: ${this.callbackUrl}`);
+            console.log(`[ContainerManager] Using fallback WebDAV URL: ${this.webdavUrl || 'not set'}`);
+        }
     }
 
     /**
@@ -113,6 +176,9 @@ export class ContainerManager extends EventEmitter {
 
         console.log('[ContainerManager] Initializing...');
 
+        // Discover service URLs from meta-core service discovery
+        await this.discoverServiceUrls();
+
         // Log WebDAV configuration
         console.log('[ContainerManager] Plugin file access configuration (WebDAV):');
         if (this.webdavUrl) {
@@ -122,8 +188,8 @@ export class ContainerManager extends EventEmitter {
             console.log('    /files/plugin/  - Plugin output (per-plugin subdirs)');
             console.log('    /files/corn     - SMB mounts (visible via WebDAV)');
         } else {
-            console.warn('  WebDAV not configured. Set PLUGIN_WEBDAV_URL.');
-            console.warn('  Plugins will not have access to files until WebDAV is configured.');
+            console.warn('  WebDAV not configured.');
+            console.warn('  Plugins will not have access to files.');
         }
 
         // Initialize Docker client
@@ -913,6 +979,27 @@ export class ContainerManager extends EventEmitter {
      */
     getPluginsConfig(): ContainerPluginsConfig | null {
         return this.pluginsConfig;
+    }
+
+    /**
+     * Get the discovered callback URL for plugins
+     */
+    getCallbackUrl(): string {
+        return this.callbackUrl;
+    }
+
+    /**
+     * Get the discovered meta-core URL
+     */
+    getMetaCoreUrl(): string {
+        return this.metaCoreUrl;
+    }
+
+    /**
+     * Get the discovered WebDAV URL for file access
+     */
+    getWebdavUrl(): string | undefined {
+        return this.webdavUrl;
     }
 }
 
