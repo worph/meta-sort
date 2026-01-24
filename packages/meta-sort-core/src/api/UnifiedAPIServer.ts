@@ -1198,8 +1198,8 @@ export class UnifiedAPIServer {
       }
 
       try {
-        const key = `/file/${hashId}/${property}`;
-        await this.kvClient!.setProperty(key, String(value));
+        // Write directly to Redis Hash (not flat keys)
+        await this.kvClient!.setMetadataProperty(hashId, property, String(value));
 
         return {
           status: 'ok',
@@ -1341,11 +1341,10 @@ export class UnifiedAPIServer {
               await this.kvClient!.setMetadataFlat(hashId, metadata, ['processingStatus']);
             }
 
-            // Update individual properties
+            // Update individual properties (write to Redis Hash)
             if (properties) {
               for (const [property, value] of Object.entries(properties)) {
-                const key = `/file/${hashId}/${property}`;
-                await this.kvClient!.setProperty(key, String(value));
+                await this.kvClient!.setMetadataProperty(hashId, property, String(value));
               }
             }
 

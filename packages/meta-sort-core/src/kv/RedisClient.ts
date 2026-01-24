@@ -298,6 +298,18 @@ export class RedisKVClient implements IKVClient {
         }
     }
 
+    /**
+     * Set a single metadata property for a file
+     * Writes directly to Redis hash field
+     */
+    async setMetadataProperty(hashId: string, property: string, value: string): Promise<void> {
+        const hashKey = this.buildKey(`file:${hashId}`);
+        await this.redis.hset(hashKey, property, value);
+
+        // Also ensure the file is in the index
+        await this.redis.sadd(this.buildKey('file:__index__'), hashId);
+    }
+
     async deleteMetadataFlat(hashId: string): Promise<number> {
         const hashKey = this.buildKey(`file:${hashId}`);
         const fieldCount = await this.redis.hlen(hashKey);

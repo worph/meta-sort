@@ -97,6 +97,11 @@ export interface IKVClient {
     getMetadata(hashId: string, propertyPath: string): Promise<any | null>;
 
     /**
+     * Set a single metadata property for a file (writes to Redis Hash)
+     */
+    setMetadataProperty(hashId: string, property: string, value: string): Promise<void>;
+
+    /**
      * Delete all metadata for a file
      */
     deleteMetadataFlat(hashId: string): Promise<number>;

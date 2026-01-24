@@ -112,6 +112,13 @@ class MockKVClient implements IKVClient {
         return entry.get(propertyPath) ?? null;
     }
 
+    async setMetadataProperty(hashId: string, property: string, value: string): Promise<void> {
+        if (!this.data.has(hashId)) {
+            this.data.set(hashId, new Map());
+        }
+        this.data.get(hashId)!.set(property, value);
+    }
+
     async deleteMetadataFlat(hashId: string): Promise<number> {
         const entry = this.data.get(hashId);
         const count = entry?.size ?? 0;
