@@ -1,4 +1,3 @@
-import {FolderWatcher, PollingWatcher} from "@metazla/meta-hash";
 import {config} from "./config/EnvConfig.js";
 
 import os from 'os';
@@ -12,6 +11,7 @@ import {KVManager} from "./kv/KVManager.js";
 import {getPluginManagerInstance, initializePluginManager} from "./logic/fileProcessor/FileProcessorPiscina.js";
 import {ContainerManager} from "./container-plugins/ContainerManager.js";
 import {ContainerPluginScheduler} from "./container-plugins/ContainerPluginScheduler.js";
+import {EventSubscriber} from "./events/EventSubscriber.js";
 
 try {
     // Get current user information
@@ -31,7 +31,6 @@ console.log(config);
 process.umask(0);//This unable the process to create files with 777 permissions
 
 let fileProcessor = new WatchedFileProcessor();
-let folders = config.WATCH_FOLDER_LIST;
 
 // KV Manager for Redis-based storage with leader election (optional)
 let kvManager: KVManager | null = null;
@@ -39,6 +38,9 @@ let kvManager: KVManager | null = null;
 // Container Manager for containerized plugins
 let containerManager: ContainerManager | null = null;
 let containerPluginScheduler: ContainerPluginScheduler | null = null;
+
+// Event Subscriber for receiving events from meta-core (Architecture V3)
+let eventSubscriber: EventSubscriber | null = null;
 
 // Calculate concurrency for pipeline stages
 const cpuCount = os.cpus().length;
@@ -69,13 +71,6 @@ const pipeline = new StreamingPipeline({
 // Connect pipeline to fileProcessor for queue status monitoring
 fileProcessor.setPipeline(pipeline);
 
-// Create generic file discovery
-const folderWatcher = new FolderWatcher();
-
-// Parse folder list
-const folderList = folders.split(',').map(f => f.trim()).filter(f => f.length > 0);
-console.log(`Watching folders: ${folderList.join(', ')}`);
-
 // VFS and state manager are available immediately
 const vfs = fileProcessor.getVirtualFileSystem();
 const unifiedStateManager = fileProcessor.getUnifiedStateManager();
@@ -84,52 +79,21 @@ const getDuplicateResult = () => fileProcessor.getDuplicateResult();
 // API Server will be initialized after KV is ready (deferred to async init)
 let apiServer: UnifiedAPIServer | null = null;
 
-// Shared progressive discovery and cleanup logic (used by both startup and manual scan)
-const runProgressiveDiscovery = async () => {
-    console.log(`[Discovery] Progressive scan mode: ${folderList.length} folders`);
-
-    // Process folders one at a time for progressive cleanup
-    for (const folder of folderList) {
-        console.log(`[Discovery] Scanning folder: ${folder}`);
-
-        // Track discovered files for this folder
-        const discoveredFilesInFolder = new Set<string>();
-
-        // Wrap discovery stream to track files
-        async function* trackDiscoveredFiles(stream: AsyncGenerator<string>) {
-            for await (const filePath of stream) {
-                discoveredFilesInFolder.add(filePath);
-                yield filePath;
-            }
-        }
-
-        const discoveryStream = folderWatcher.discoverFiles([folder]);
-        const trackedStream = trackDiscoveredFiles(discoveryStream);
-
-        await pipeline.start(trackedStream);
-
-        // Progressive cleanup: clean up after each folder completes
-        console.log(`[Discovery] Folder scan complete: ${folder}. Found ${discoveredFilesInFolder.size} files. Running cleanup...`);
-        await fileProcessor.cleanupStaleEntries([folder], discoveredFilesInFolder);
-        console.log(`[Discovery] Cleanup complete for folder: ${folder}`);
-    }
-
-    console.log(`[Discovery] All folders scanned and cleaned up`);
-};
-
-// Manual scan trigger (called from API)
-// Note: Stremio updates happen automatically via incremental add/remove notifications
-// during file processing (like FUSE), so no explicit refresh needed here
+// Manual scan trigger (called from API) - delegates to meta-core via EventSubscriber
 const triggerScan = async () => {
-    console.log('[Scan] Triggering manual scan from API...');
+    console.log('[Scan] Triggering manual scan...');
 
     // Reset pipeline counters and state before fresh scan
     // Also publishes reset event to meta-fuse
     await pipeline.reset();
 
-    console.log('[Scan] Starting fresh discovery...');
-    await runProgressiveDiscovery();
-    console.log('[Scan] Manual scan complete');
+    // Trigger scan on meta-core (which will send events back via SSE)
+    if (eventSubscriber) {
+        await eventSubscriber.triggerScan();
+        console.log('[Scan] Scan triggered on meta-core');
+    } else {
+        console.warn('[Scan] EventSubscriber not available, cannot trigger scan');
+    }
 };
 
 // Global error handlers - prevent crashes from unforeseen errors
@@ -153,6 +117,12 @@ process.on('SIGINT', async () => {
         await apiServer.stop();
     }
 
+    // Stop Event Subscriber if running
+    if (eventSubscriber) {
+        console.log('[Shutdown] Stopping Event Subscriber...');
+        await eventSubscriber.stop();
+    }
+
     // Stop Container Manager if running
     if (containerManager) {
         console.log('[Shutdown] Stopping Container Manager...');
@@ -171,6 +141,13 @@ process.on('SIGINT', async () => {
 // Start initial discovery and processing (streaming pipeline)
 (async () => {
     try {
+        // Validate META_CORE_URL is configured
+        if (!config.META_CORE_URL) {
+            console.error('[Startup] ERROR: META_CORE_URL is required. Set META_CORE_URL environment variable.');
+            console.error('[Startup] Example: META_CORE_URL=http://meta-core');
+            process.exit(1);
+        }
+
         // Initialize KV Manager if configured (Redis + leader election)
         if (config.META_CORE_PATH) {
             console.log('[Startup] Initializing KV Manager (Redis + leader election)...');
@@ -278,10 +255,6 @@ process.on('SIGINT', async () => {
         await fileProcessor.rebuildVFSFromKV();
         console.log('[Startup] VFS rebuild completed');
 
-        console.log('[Startup] Starting initial file discovery with progressive cleanup...');
-        await runProgressiveDiscovery();
-        console.log('[Startup] Initial discovery completed, processing continues in background');
-
         // Log cache performance summary
         const metrics = performanceMetrics.getMetrics();
         if (metrics.cacheHits.midhash256 || metrics.cacheMisses.midhash256) {
@@ -292,32 +265,18 @@ process.on('SIGINT', async () => {
             console.log(`[Cache] midhash256 cache: ${hits} hits, ${misses} misses (${hitRate}% hit rate)`);
         }
 
-        // Setup file watching for changes
-        console.log('[Startup] Setting up file watching...');
-        folderWatcher.watch(folderList, {
-            onAdd: (filePath) => pipeline.handleFileAdded(filePath),
-            onChange: (filePath) => pipeline.handleFileChanged(filePath),
-            onUnlink: (filePath) => pipeline.handleFileDeleted(filePath)
-        }, {
-            interval: config.WATCH_FOLDER_POOLING_INTERVAL_MS || 30000,
-            stabilityThreshold: 30000,
-            pollInterval: 5000
+        // Connect to meta-core for file events via SSE (Architecture V3)
+        console.log(`[Startup] Connecting to meta-core at ${config.META_CORE_URL}...`);
+        eventSubscriber = new EventSubscriber({
+            metaCoreUrl: config.META_CORE_URL,
+            pipeline: pipeline,
+            requestInitialScan: true, // Request initial scan from meta-core
+            reconnectDelayMs: 5000,
         });
-        console.log('[Startup] File watching active');
+        await eventSubscriber.start();
+        console.log('[Startup] EventSubscriber connected to meta-core');
+
     } catch (error) {
-        console.error('[Startup] Error during initial discovery:', error);
+        console.error('[Startup] Error during startup:', error);
     }
 })();
-
-// Start PollingWatcher for path-specific polling (if configured)
-if (config.POLLING_PATHS && config.POLLING_PATHS.length > 0) {
-    console.log(`PollingWatcher: ${config.POLLING_PATHS.length} paths configured`);
-    const pollingWatcher = new PollingWatcher(fileProcessor, config.POLLING_PATHS);
-    pollingWatcher.start().then(() => {
-        console.log('PollingWatcher started successfully');
-    }).catch((error) => {
-        console.error('Error starting PollingWatcher:', error);
-    });
-} else {
-    console.log('PollingWatcher: No polling paths configured (skipped)');
-}

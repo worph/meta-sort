@@ -527,18 +527,37 @@ export class StreamingPipeline {
         (this.config as any).containerPluginScheduler = scheduler;
 
         // Listen for file:complete events to transition files to done state
-        scheduler.on('file:complete', ({ fileHash, filePath }) => {
+        scheduler.on('file:complete', async ({ fileHash, filePath }) => {
             console.log(`[Pipeline] Container plugins complete for ${filePath} (${fileHash})`);
 
-            // Get virtual path from metadata if available
+            // Fetch metadata from Redis (container plugins write directly to Redis via /meta API)
             let virtualPath: string | undefined;
-            const metadata = this.config.fileProcessor?.getDatabase().get(filePath);
-            if (metadata) {
-                try {
-                    virtualPath = this.config.metaDataToFolderStruct.renamingRule(metadata as any, filePath);
-                } catch {
-                    // Renaming rule may fail for incomplete metadata
+            let metadata: Record<string, any> | undefined;
+
+            try {
+                if (this.config.kvClient) {
+                    // Get fresh metadata from Redis
+                    const redisMetadata = await this.config.kvClient.getMetadataFlat(fileHash);
+                    if (redisMetadata && Object.keys(redisMetadata).length > 0) {
+                        metadata = redisMetadata;
+                        // Update local database to stay in sync
+                        if (this.config.fileProcessor?.getDatabase()) {
+                            this.config.fileProcessor.getDatabase().set(filePath, metadata);
+                        }
+                    }
                 }
+
+                // Fallback to local database if Redis fetch failed
+                if (!metadata) {
+                    metadata = this.config.fileProcessor?.getDatabase().get(filePath);
+                }
+
+                if (metadata) {
+                    virtualPath = this.config.metaDataToFolderStruct.renamingRule(metadata as any, filePath);
+                }
+            } catch (error) {
+                // Renaming rule may fail for incomplete metadata
+                console.warn(`[Pipeline] Failed to compute virtualPath for ${filePath}:`, error);
             }
 
             // Transition file to done state

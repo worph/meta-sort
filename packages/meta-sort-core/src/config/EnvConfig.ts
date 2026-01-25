@@ -1,23 +1,12 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-export interface PollingPathConfig {
-    path: string;
-    intervalMs: number;
-}
-
 interface EnvConfig {
-    /** Comma-separated list of folders to watch for changes.(mandatory) */
-    WATCH_FOLDER_LIST: string;
-
     /** Path to the index file within the NFO CID library. */
     INDEX_FOLDER_PATH: string;
 
     /** Interval in milliseconds to update/check for changes. (default 30000) */
     UPDATE_INTERVAL_MS: number;
-
-    /** Interval in milliseconds for polling watch folders. Set to 0 to disable polling. (default 0) */
-    WATCH_FOLDER_POOLING_INTERVAL_MS: number;
 
     /** CHMOD for new folder format (default 0o777) */
     CHMOD_FOR_NEW_FOLDER: number;
@@ -41,11 +30,8 @@ interface EnvConfig {
     /** Maximum number of worker threads for Piscina worker pool AND max concurrent file processing (default: CPU count) */
     MAX_WORKER_THREADS?: number;
 
-    /** JSON array of polling path configurations. Example: '[{"path": "/data/watch/smb/downloads", "intervalMs": 60000}]' (optional) */
-    POLLING_PATHS?: PollingPathConfig[];
-
     // ========================================================================
-    // KV Storage Configuration (NEW)
+    // KV Storage Configuration
     // ========================================================================
 
     /** Path to META_CORE_VOLUME - infrastructure volume for KV DB, locks, services (default '/meta-core') */
@@ -123,54 +109,30 @@ interface EnvConfig {
 
     // NOTE: Plugin output files are written via WebDAV (WEBDAV_URL/plugin/<pluginId>/)
     // No PLUGIN_OUTPUT_HOST_PATH needed - plugins use HTTP PUT to write files
-}
 
-// Parse POLLING_PATHS from JSON string
-function parsePollingPaths(): PollingPathConfig[] | undefined {
-    if (!process.env.POLLING_PATHS) {
-        return undefined;
-    }
+    // ========================================================================
+    // Event Subscriber Configuration (Architecture V3)
+    // ========================================================================
 
-    try {
-        const parsed = JSON.parse(process.env.POLLING_PATHS);
-        if (!Array.isArray(parsed)) {
-            console.error('POLLING_PATHS must be a JSON array');
-            return undefined;
-        }
-
-        // Validate structure
-        const valid = parsed.every(item =>
-            item && typeof item === 'object' &&
-            typeof item.path === 'string' &&
-            typeof item.intervalMs === 'number'
-        );
-
-        if (!valid) {
-            console.error('POLLING_PATHS entries must have {path: string, intervalMs: number}');
-            return undefined;
-        }
-
-        return parsed as PollingPathConfig[];
-    } catch (error) {
-        console.error('Failed to parse POLLING_PATHS:', error);
-        return undefined;
-    }
+    /**
+     * URL of meta-core API for event subscription (SSE).
+     * REQUIRED: meta-sort receives file events from meta-core via SSE.
+     * Example: "http://meta-core" or "http://localhost:8083"
+     */
+    META_CORE_URL?: string;
 }
 
 export const config: EnvConfig = {
-    WATCH_FOLDER_LIST: process.env.WATCH_FOLDER_LIST,
-    INDEX_FOLDER_PATH: process.env.INDEX_FOLDER_PATH || '/data/cache/hash-index',//default /data/cache/hash-index
-    UPDATE_INTERVAL_MS: parseInt(process.env.UPDATE_INTERVAL_MS || "30000", 10),//default 30000
-    WATCH_FOLDER_POOLING_INTERVAL_MS: parseInt(process.env.WATCH_FOLDER_POOLING_INTERVAL_MS || "0", 10),//default 0
-    CHMOD_FOR_NEW_FOLDER: process.env.CHMOD_FOR_NEW_FOLDER && parseInt(process.env.CHMOD_FOR_NEW_FOLDER, 8),//default 0o777 (this is the default for mkdir)
-    CACHE_FOLDER_PATH: process.env.CACHE_FOLDER_PATH || '/data/cache',//default /data/cache
+    INDEX_FOLDER_PATH: process.env.INDEX_FOLDER_PATH || '/data/cache/hash-index',
+    UPDATE_INTERVAL_MS: parseInt(process.env.UPDATE_INTERVAL_MS || "30000", 10),
+    CHMOD_FOR_NEW_FOLDER: process.env.CHMOD_FOR_NEW_FOLDER && parseInt(process.env.CHMOD_FOR_NEW_FOLDER, 8),
+    CACHE_FOLDER_PATH: process.env.CACHE_FOLDER_PATH || '/data/cache',
     JELLYFIN_ENDPOINT: process.env.JELLYFIN_ENDPOINT!,
     JELLYFIN_API_KEY: process.env.JELLYFIN_API_KEY!,
-    FUSE_API_PORT: parseInt(process.env.FUSE_API_PORT || "3000", 10),//default 3000
-    FUSE_API_HOST: process.env.FUSE_API_HOST || '0.0.0.0',//default 0.0.0.0
-    METADATA_FORMATS: (process.env.METADATA_FORMATS || 'meta').split(',').map(f => f.trim()).filter(f => f.length > 0),//default 'meta'
+    FUSE_API_PORT: parseInt(process.env.FUSE_API_PORT || "3000", 10),
+    FUSE_API_HOST: process.env.FUSE_API_HOST || '0.0.0.0',
+    METADATA_FORMATS: (process.env.METADATA_FORMATS || 'meta').split(',').map(f => f.trim()).filter(f => f.length > 0),
     MAX_WORKER_THREADS: process.env.MAX_WORKER_THREADS ? parseInt(process.env.MAX_WORKER_THREADS, 10) : undefined,
-    POLLING_PATHS: parsePollingPaths(),
 
     // KV Storage Configuration
     META_CORE_PATH: process.env.META_CORE_PATH || '/meta-core',
@@ -194,11 +156,7 @@ export const config: EnvConfig = {
     PLUGIN_WEBDAV_URL: process.env.PLUGIN_WEBDAV_URL,
     PLUGIN_STACK_NAME: process.env.PLUGIN_STACK_NAME,
     PLUGIN_CACHE_HOST_PATH: process.env.PLUGIN_CACHE_HOST_PATH,
+
+    // Event Subscriber Configuration
+    META_CORE_URL: process.env.META_CORE_URL,
 };
-
-if(process.env.TEST!=='true') {
-    if (!config.WATCH_FOLDER_LIST) {
-        console.error('Invalid configuration: WATCH_FOLDER_LIST is required');
-    }
-}
-

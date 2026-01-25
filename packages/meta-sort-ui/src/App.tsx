@@ -1,10 +1,11 @@
 import { Routes, Route } from 'react-router-dom';
 import Welcome from './pages/Welcome';
 import Monitor from './pages/Monitor';
-import Mounts from './pages/Mounts';
 import Plugins from './pages/Plugins';
 import Duplicates from './pages/Duplicates';
 import ServiceNav from './components/ServiceNav';
+
+// NOTE: Mounts page has been moved to meta-core dashboard
 
 function App() {
   return (
@@ -15,7 +16,6 @@ function App() {
           <Route path="/" element={<Welcome />} />
           <Route path="/monitor" element={<Monitor />} />
           <Route path="/duplicates" element={<Duplicates />} />
-          <Route path="/mounts" element={<Mounts />} />
           <Route path="/plugins" element={<Plugins />} />
         </Routes>
       </main>

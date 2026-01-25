@@ -839,10 +839,10 @@ describe('UnifiedAPIServer', function() {
     });
 
     // =========================================================================
-    // Mounts API (Mounts Page)
+    // Mounts API (Mounts Page) - SKIPPED in Architecture V3 (moved to meta-core)
     // =========================================================================
 
-    describe('Mounts API (/api/mounts/*)', function() {
+    describe.skip('Mounts API (/api/mounts/*)', function() {
         it('GET /api/mounts returns mount list', async function() {
             const response = await app.inject({
                 method: 'GET',

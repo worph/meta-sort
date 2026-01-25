@@ -119,9 +119,31 @@ export class ContainerManager extends EventEmitter {
 
     /**
      * Discover service URLs from meta-core service discovery file
-     * Falls back to environment variables if discovery fails
+     * Explicit env vars (CONTAINER_CALLBACK_URL, PLUGIN_WEBDAV_URL) take priority
+     * Service discovery is only used as fallback
      */
     private async discoverServiceUrls(): Promise<void> {
+        // Check if explicit env vars are set - these take priority for container communication
+        const explicitCallbackUrl = config.CONTAINER_CALLBACK_URL;
+        const explicitWebdavUrl = config.PLUGIN_WEBDAV_URL;
+
+        if (explicitCallbackUrl) {
+            this.callbackUrl = explicitCallbackUrl;
+            console.log(`[ContainerManager] Using explicit callback URL: ${this.callbackUrl}`);
+        }
+
+        if (explicitWebdavUrl) {
+            this.webdavUrl = explicitWebdavUrl;
+            console.log(`[ContainerManager] Using explicit WebDAV URL: ${this.webdavUrl}`);
+        }
+
+        // If both are explicitly set, skip service discovery
+        if (explicitCallbackUrl && explicitWebdavUrl) {
+            console.log('[ContainerManager] Using explicit env vars, skipping service discovery');
+            return;
+        }
+
+        // Fall back to service discovery for any missing URLs
         const serviceFile = join(config.META_CORE_PATH, 'services', 'meta-sort.json');
 
         try {
@@ -132,23 +154,27 @@ export class ContainerManager extends EventEmitter {
             const api = serviceInfo.api;
             const endpoints = serviceInfo.endpoints || {};
 
-            // Update URLs from service discovery
-            if (endpoints.callback) {
-                this.callbackUrl = endpoints.callback;
-                console.log(`[ContainerManager] Discovered callback URL: ${this.callbackUrl}`);
-            } else if (api) {
-                // Fallback: construct from api base
-                this.callbackUrl = `${api}/api/plugins/callback`;
-                console.log(`[ContainerManager] Constructed callback URL: ${this.callbackUrl}`);
+            // Only use service discovery if env var not set
+            if (!explicitCallbackUrl) {
+                if (endpoints.callback) {
+                    this.callbackUrl = endpoints.callback;
+                    console.log(`[ContainerManager] Discovered callback URL: ${this.callbackUrl}`);
+                } else if (api) {
+                    // Fallback: construct from api base
+                    this.callbackUrl = `${api}/api/plugins/callback`;
+                    console.log(`[ContainerManager] Constructed callback URL: ${this.callbackUrl}`);
+                }
             }
 
-            if (endpoints.webdav) {
-                this.webdavUrl = endpoints.webdav;
-                console.log(`[ContainerManager] Discovered WebDAV URL: ${this.webdavUrl}`);
-            } else if (api) {
-                // Fallback: construct from api base
-                this.webdavUrl = `${api}/webdav`;
-                console.log(`[ContainerManager] Constructed WebDAV URL: ${this.webdavUrl}`);
+            if (!explicitWebdavUrl) {
+                if (endpoints.webdav) {
+                    this.webdavUrl = endpoints.webdav;
+                    console.log(`[ContainerManager] Discovered WebDAV URL: ${this.webdavUrl}`);
+                } else if (api) {
+                    // Fallback: construct from api base
+                    this.webdavUrl = `${api}/webdav`;
+                    console.log(`[ContainerManager] Constructed WebDAV URL: ${this.webdavUrl}`);
+                }
             }
 
             if (endpoints.health) {
