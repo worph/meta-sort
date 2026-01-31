@@ -1,5 +1,5 @@
 # meta-sort standalone Docker image
-# Includes: Redis, nginx, rclone, FFmpeg, Node.js backend, React UI, and Editor
+# Includes: Redis, nginx, rclone, FFmpeg, Node.js backend, and React UI
 #
 # Build standalone:
 #   docker build -t meta-sort .
@@ -24,20 +24,7 @@ RUN npm install
 COPY packages/meta-sort-ui/ ./
 RUN npm run build
 
-# Stage 2: Build Editor
-FROM node:21-alpine AS editor-builder
-
-WORKDIR /build
-
-# Copy editor package and install
-COPY packages/meta-sort-editor/package.json ./
-RUN npm install
-
-# Copy editor source and build
-COPY packages/meta-sort-editor/ ./
-RUN npm run build
-
-# Stage 3: Build Backend using pnpm workspace
+# Stage 2: Build Backend using pnpm workspace
 FROM node:21-alpine AS backend-builder
 
 # Install pnpm
@@ -67,7 +54,7 @@ RUN pnpm --filter="@worph/async-utils" build || true
 # Build the core package
 RUN pnpm --filter="@meta-sort/core" build
 
-# Stage 4: Runtime
+# Stage 3: Runtime
 FROM ubuntu:22.04
 
 # Container registry metadata
@@ -105,7 +92,6 @@ RUN curl https://rclone.org/install.sh | bash
 RUN mkdir -p \
     /app/backend \
     /app/ui \
-    /app/editor \
     /data/watch \
     /data/cache \
     /data/redis \
@@ -121,10 +107,6 @@ RUN mkdir -p \
 # Copy built UI
 COPY --from=ui-builder /build/dist /app/ui
 RUN chmod -R 755 /app/ui
-
-# Copy built Editor
-COPY --from=editor-builder /build/dist /app/editor
-RUN chmod -R 755 /app/editor
 
 # Copy built backend with all dependencies
 COPY --from=backend-builder /build/packages/meta-sort-core/dist /app/backend/dist

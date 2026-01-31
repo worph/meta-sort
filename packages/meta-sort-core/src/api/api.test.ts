@@ -192,7 +192,7 @@ class MockProcessingStateManager {
     }
 
     // Helpers for tests
-    addPending(path: string): void {
+    addDiscovered(path: string): void {
         this.pending.add(path);
     }
 
@@ -258,7 +258,7 @@ describe('UnifiedAPIServer', function() {
         });
 
         mockStateManager.addDone('/files/test/Test Movie.mp4');
-        mockStateManager.addPending('/files/test/pending.mp4');
+        mockStateManager.addDiscovered('/files/test/pending.mp4');
 
         // Create VFS (no params needed - uses defaults)
         const vfs = new VirtualFileSystem();
@@ -429,130 +429,6 @@ describe('UnifiedAPIServer', function() {
     });
 
     // =========================================================================
-    // Metadata API (File Browser)
-    // =========================================================================
-
-    describe('Metadata API (/api/metadata/*)', function() {
-        it('GET /api/metadata/hash-ids returns list of hash IDs', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/hash-ids'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('hashIds');
-            expect(Array.isArray(body.hashIds)).to.be.true;
-            expect(body.hashIds).to.include('testhash001');
-        });
-
-        it('GET /api/metadata/list returns paginated file list', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/list?limit=10&offset=0'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('files');
-            expect(body).to.have.property('total');
-            expect(Array.isArray(body.files)).to.be.true;
-        });
-
-        it('GET /api/metadata/:hashId returns file metadata', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/testhash001'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            // API returns metadata flat (not wrapped in { hashId, metadata })
-            expect(body).to.have.property('fileName', 'Test Movie.mp4');
-        });
-
-        it('GET /api/metadata/:hashId returns 404 for unknown hash', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/unknownhash'
-            });
-
-            expect(response.statusCode).to.equal(404);
-        });
-
-        it('GET /api/metadata/:hashId/property returns specific property', async function() {
-            // The API uses getProperty with key format /file/{hashId}/{property}
-            // We need to seed the property in the rawStore
-            await mockKV.setProperty('/file/testhash001/videoType', 'movie');
-
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/testhash001/property?property=videoType'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('value', 'movie');
-        });
-
-        it('PUT /api/metadata/:hashId updates metadata', async function() {
-            const response = await app.inject({
-                method: 'PUT',
-                url: '/api/metadata/testhash001',
-                payload: {
-                    customField: 'customValue'
-                }
-            });
-
-            expect(response.statusCode).to.equal(200);
-
-            // Verify the update
-            const verify = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/testhash001'
-            });
-            const body = JSON.parse(verify.payload);
-            // Response is flat metadata
-            expect(body).to.have.property('customField', 'customValue');
-        });
-
-        it('DELETE /api/metadata/:hashId deletes file metadata', async function() {
-            // First create a test entry
-            mockKV.seedData('deleteme', { fileName: 'delete.mp4' });
-
-            const response = await app.inject({
-                method: 'DELETE',
-                url: '/api/metadata/deleteme'
-            });
-
-            expect(response.statusCode).to.equal(200);
-
-            // Verify deletion
-            const verify = await app.inject({
-                method: 'GET',
-                url: '/api/metadata/deleteme'
-            });
-            expect(verify.statusCode).to.equal(404);
-        });
-
-        it('POST /api/metadata/search searches files', async function() {
-            const response = await app.inject({
-                method: 'POST',
-                url: '/api/metadata/search',
-                payload: {
-                    property: 'videoType',
-                    propertyValue: 'movie'
-                }
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('results');
-            expect(Array.isArray(body.results)).to.be.true;
-        });
-    });
-
-    // =========================================================================
     // Stats API (Dashboard)
     // =========================================================================
 
@@ -691,35 +567,6 @@ describe('UnifiedAPIServer', function() {
             const body = JSON.parse(response.payload);
             expect(body).to.have.property('directories');
             expect(Array.isArray(body.directories)).to.be.true;
-        });
-    });
-
-    // =========================================================================
-    // KV Browser API (Editor)
-    // =========================================================================
-
-    describe('KV Browser API (/api/kv/*)', function() {
-        it('GET /api/kv/info returns database info', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/kv/info'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('fileCount');
-        });
-
-        it('GET /api/kv/keys returns paginated keys', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/kv/keys?cursor=0&count=50'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('keys');
-            expect(Array.isArray(body.keys)).to.be.true;
         });
     });
 

@@ -13,6 +13,8 @@ import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateMa
 import { DuplicateResult } from '../logic/DuplicateFinder.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import type { KVManager } from '../kv/KVManager.js';
+import type { ExtendedProcessingSnapshot, IKVClientWithPubSub } from '../types/ExtendedInterfaces.js';
+import { getErrorMessage } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
 import type { PluginManager } from '../plugin-engine/PluginManager.js';
 import type { TaskScheduler } from '../plugin-engine/TaskScheduler.js';
@@ -631,12 +633,12 @@ export class UnifiedAPIServer {
       // Get snapshot from state manager
       // Note: VFS-related features have been moved to meta-fuse
       // totalDone now uses state manager's count of fully processed files
-      const snapshot = this.unifiedStateManager!.getSnapshot(0, this.fastQueueConcurrency, this.backgroundQueueConcurrency);
+      const snapshot = this.unifiedStateManager!.getSnapshot(0, this.fastQueueConcurrency, this.backgroundQueueConcurrency) as ExtendedProcessingSnapshot;
 
       // Add queue status if available
       if (this.getQueueStatus) {
         const queueStatus = this.getQueueStatus();
-        (snapshot as any).queueStatus = queueStatus;
+        snapshot.queueStatus = queueStatus;
 
         // Add calculated fields that the UI needs (make API self-describing)
         // Pipeline: validation (preProcess) → lightProcessing (fast) → hashProcessing (background)
@@ -659,7 +661,7 @@ export class UnifiedAPIServer {
         // Get gate status if container scheduler is available
         const gateStatus = this.containerPluginScheduler?.getGateStatus();
 
-        (snapshot as any).computed = {
+        snapshot.computed = {
           // Pre-process queue (validation - quick extension checks)
           preProcessRunning,
           preProcessPending,
@@ -693,7 +695,7 @@ export class UnifiedAPIServer {
 
       // Add failed files count from metrics
       const metrics = performanceMetrics.getMetrics();
-      (snapshot as any).totalFailed = metrics.totalFailedFiles || 0;
+      snapshot.totalFailed = metrics.totalFailedFiles || 0;
 
       return snapshot;
     });
@@ -722,7 +724,7 @@ export class UnifiedAPIServer {
         // Trigger scan callback if available to pick up the file
         if (this.triggerScanCallback) {
           // Don't await - just trigger async
-          this.triggerScanCallback().catch(() => {});
+          this.triggerScanCallback().catch(err => console.warn('[API] Scan trigger failed during retry:', getErrorMessage(err)));
         }
 
         return { status: 'ok', message: `File ${filePath} queued for retry` };
@@ -744,7 +746,7 @@ export class UnifiedAPIServer {
 
       // Trigger scan callback if available
       if (this.triggerScanCallback) {
-        this.triggerScanCallback().catch(() => {});
+        this.triggerScanCallback().catch(err => console.warn('[API] Scan trigger failed during retry-all:', getErrorMessage(err)));
       }
 
       return { status: 'ok', message: `${queued} files queued for retry` };
@@ -838,7 +840,7 @@ export class UnifiedAPIServer {
     this.app.get('/api/stats', async (request, reply) => {
       try {
         const hashIds = await this.kvClient!.getAllHashIds();
-        const redis = (this.kvClient as any).getRedisClient?.();
+        const redis = (this.kvClient as IKVClientWithPubSub).getRedisClient?.() as { info: (section: string) => Promise<string> } | undefined;
 
         let memoryUsage = 'N/A';
         let memoryUsageBytes = 0;

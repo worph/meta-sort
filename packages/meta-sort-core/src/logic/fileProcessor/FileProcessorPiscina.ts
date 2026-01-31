@@ -95,7 +95,6 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
 
         this.piscina = new Piscina({
             maxThreads,
-            //maxThreads: 1,//TODO note for DEBUG must be set to 1 to avoid memory issues
             filename:workerUrl
         });
 

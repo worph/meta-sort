@@ -8,6 +8,7 @@ import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
 import { HashMeta } from '@metazla/meta-interface';
+import type { ExtendedHashMeta } from '../types/ExtendedInterfaces.js';
 import {
   IFuseAPI,
   VirtualDirectory,
@@ -149,9 +150,10 @@ export class VirtualFileSystem extends EventEmitter implements IFuseAPI {
     let mtime: Date;
     let ctime: Date;
 
-    if (metadata && (metadata as any).sizeByte) {
+    const extMeta = metadata as ExtendedHashMeta | undefined;
+    if (extMeta && extMeta.sizeByte) {
       // Use cached metadata (fast path - no disk I/O)
-      size = parseInt((metadata as any).sizeByte, 10);
+      size = parseInt(String(extMeta.sizeByte), 10);
       // Use current time as placeholder for mtime/ctime (will be corrected on next scan)
       mtime = new Date();
       ctime = new Date();
@@ -458,7 +460,8 @@ export class VirtualFileSystem extends EventEmitter implements IFuseAPI {
       // Only count actual media files (not directories, not metadata files)
       if (node.type === 'file' && node.sourcePath && node.metadata) {
         // Check if file has completed processing (both light and hash phases)
-        if ((node.metadata as any).processingStatus === 'complete') {
+        const extMeta = node.metadata as ExtendedHashMeta;
+        if (extMeta.processingStatus === 'complete') {
           count++;
         }
       }

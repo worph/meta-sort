@@ -15,6 +15,7 @@ import {VirtualFileSystem} from "../api/VirtualFileSystem.js";
 import {performanceMetrics} from "../metrics/PerformanceMetrics.js";
 import {UnifiedProcessingStateManager} from "./UnifiedProcessingStateManager.js";
 import type {IKVClient} from "../kv/IKVClient.js";
+import { hasPublish, type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
 import PQueue from "p-queue";
 import os from 'os';
 import { TaskScheduler, createTaskScheduler, MetadataNodeKVStore } from "../plugin-engine/index.js";
@@ -29,7 +30,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     metaDataToFolderStruct = new MetaDataToFolderStruct(renamingRule);
     virtualFileSystem: VirtualFileSystem;
     unifiedStateManager = new UnifiedProcessingStateManager();
-    //fileProcessor:FileAnalyzerInterface = new FileProcessor();//TODO only use for debug
     fileProcessor:FileAnalyzerInterface = new FileProcessorPiscina();
     duplicateFinder = new DuplicateFinder();
     duplicateResult: DuplicateResult | null = null;
@@ -249,7 +249,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
      */
     private async publishPluginComplete(fileHash: string, pluginId: string, filePath: string): Promise<void> {
         const kvClient = this.getKVClient();
-        if (!kvClient || typeof (kvClient as any).publish !== 'function') {
+        if (!kvClient || !hasPublish(kvClient)) {
             return;
         }
 
@@ -260,7 +260,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 filePath,
                 timestamp: Date.now()
             });
-            await (kvClient as any).publish('meta-sort:plugin:complete', message);
+            await kvClient.publish('meta-sort:plugin:complete', message);
         } catch (error) {
             // Silent fail - pub/sub is optional
         }
@@ -298,11 +298,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         // Phase 1: Pre-process (midhash256 computation)
         // Phase 2: Plugin execution via TaskScheduler (fast/background queues)
 
-        // Debug: log queue state before adding
-        console.log(`[DEBUG queueFile] Before add: size=${this.preProcessQueue.size}, pending=${this.preProcessQueue.pending}`);
-
         await this.preProcessQueue.add(async () => {
-            console.log(`[DEBUG queueFile] Task started: size=${this.preProcessQueue.size}, pending=${this.preProcessQueue.pending}`);
             try {
                 // STATE: Start LIGHT processing
                 if (this.unifiedStateManager) {
@@ -314,7 +310,8 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 const { computeMidHash256 } = await import('@metazla/meta-hash');
 
                 // Check cache first
-                const indexLine = (this.fileProcessor as any).indexManager?.getCidForFile(
+                const extAnalyzer = this.fileProcessor as ExtendedFileAnalyzer;
+                const indexLine = extAnalyzer.indexManager?.getCidForFile(
                     filePath,
                     fileStats.size,
                     fileStats.mtime.toISOString()
@@ -331,7 +328,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                     performanceMetrics.recordCacheMiss('midhash256');
 
                     // Store in cache for future lookups
-                    (this.fileProcessor as any).indexManager?.addFileCid(
+                    extAnalyzer.indexManager?.addFileCid(
                         filePath,
                         fileStats.size,
                         fileStats.mtime.toISOString(),
@@ -570,7 +567,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
             for (const metadata of metadataList) {
                 if (metadata && metadata.filePath) {
                     // Mark as unverified - discovery will validate later
-                    (metadata as any)._lastVerified = 0;
+                    (metadata as ExtendedHashMeta)._lastVerified = 0;
                     this.fileProcessor.getDatabase().set(metadata.filePath, metadata);
                     loadedCount++;
                 }

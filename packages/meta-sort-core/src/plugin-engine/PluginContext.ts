@@ -301,7 +301,11 @@ export class PluginCacheImpl implements PluginCache {
         try {
             const files = await fs.readdir(this.cacheDir);
             await Promise.all(
-                files.map(file => fs.unlink(path.join(this.cacheDir, file)).catch(() => {}))
+                files.map(file =>
+                    fs.unlink(path.join(this.cacheDir, file)).catch(err =>
+                        console.warn('[PluginCache] Failed to delete cache file:', file, err instanceof Error ? err.message : err)
+                    )
+                )
             );
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

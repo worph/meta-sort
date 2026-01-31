@@ -61,16 +61,12 @@ export class FileProcessor implements FileAnalyzerInterface{
                 }
             }
 
-            // --------------------------------------------
             // Hash logic compute and get the hash - use cache etc...
-            // --------------------------------------------
             const result = await this.fileProcessor.processFile(filePath,hash);
-            //const result = await this.fileProcessor.processFile(filePath,params.hash);
 
             //save the metadata to the cache or disk
             this.database.set(filePath, result.metadata);
             this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), result.metadata);
-            //console.log(`File [${current}/${queueSize}] ${filePath} took ${result.time}ms`);
         } catch (e) {
             console.error(`Error processing file [No Thread] ${filePath}:`, e);
         }

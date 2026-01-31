@@ -361,8 +361,7 @@ async function discoverService(name: string): Promise<ServiceInfo | null> {
 │  │      ├── Watches /files/* for new media files                         ││
 │  │      ├── Extracts metadata → writes to KV (Redis in /meta-core/db)    ││
 │  │      ├── Manages remote mounts INTO /files (NFS, SMB, rclone)         ││
-│  │      ├── Leader election (spawns Redis if leader)                      ││
-│  │      └── Serves monitoring UI (meta-sort-editor)                       ││
+│  │      └── Leader election (spawns Redis if leader)                      ││
 │  │                                                                        ││
 │  │  [2] meta-fuse          PROCESS-READ                                   ││
 │  │      ├── Reads metadata from KV (Redis)                                ││
@@ -664,9 +663,6 @@ meta-sort/
 │   │   │   ├── utils/          # Utility functions
 │   │   │   └── index.ts        # Entry point
 │   │   └── package.json
-│   │
-│   ├── meta-sort-editor/       # Metadata editor UI (@meta-sort/editor)
-│   │   └── ...                 # React/Vite app
 │   │
 │   ├── meta-sort-ui/           # Monitoring dashboard (@meta-sort/ui)
 │   │   └── ...                 # React/Vite app

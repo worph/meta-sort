@@ -12,6 +12,7 @@ import { promises as fs } from 'fs';
 import { hostname } from 'os';
 import { join } from 'path';
 import type { ServiceInfo } from './IKVClient.js';
+import { isNodeError } from '../types/ExtendedInterfaces.js';
 
 interface ServiceDiscoveryConfig {
     /** Path to META_CORE_VOLUME (e.g., /meta-core) */
@@ -126,7 +127,7 @@ export class ServiceDiscovery {
             await fs.writeFile(this.serviceFilePath, JSON.stringify(info, null, 2));
         } catch (error) {
             // If file was deleted, re-register
-            if ((error as any).code === 'ENOENT') {
+            if (isNodeError(error) && error.code === 'ENOENT') {
                 await this.register();
                 await this.updateStatus('running');
             } else {
@@ -200,7 +201,7 @@ export class ServiceDiscovery {
 
             return service;
         } catch (error) {
-            if ((error as any).code === 'ENOENT') {
+            if (isNodeError(error) && error.code === 'ENOENT') {
                 return null; // Service not registered
             }
             throw error;
@@ -228,7 +229,7 @@ export class ServiceDiscovery {
 
             return services;
         } catch (error) {
-            if ((error as any).code === 'ENOENT') {
+            if (isNodeError(error) && error.code === 'ENOENT') {
                 return []; // Services directory doesn't exist yet
             }
             throw error;

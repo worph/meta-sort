@@ -180,7 +180,6 @@ export class JellyfinNfo {
             existingData[targetRoot] = root;
 
             if (hasChanged) {
-                //const builder = new Builder({ headless: true, renderOpts: { 'pretty': true } });
                 const builder = new Builder();
                 // Convert the updated object back to XML
                 try {

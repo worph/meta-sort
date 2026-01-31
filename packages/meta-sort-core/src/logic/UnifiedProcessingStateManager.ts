@@ -83,13 +83,6 @@ export class UnifiedProcessingStateManager {
   }
 
   /**
-   * @deprecated Use addDiscovered instead
-   */
-  addPending(filePath: string): void {
-    this.addDiscovered(filePath);
-  }
-
-  /**
    * Move file from discovered to light processing
    */
   startLightProcessing(filePath: string): void {

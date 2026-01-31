@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import type { TaskQueueType } from '../plugin-engine/types.js';
 import type { IKVClient } from '../kv/IKVClient.js';
+import { hasPublish, type ExtendedContainerTask } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
 
 /**
@@ -218,7 +219,7 @@ export class ContainerPluginScheduler extends EventEmitter {
      * to be notified when specific plugins complete for a file.
      */
     private async publishPluginComplete(fileHash: string, pluginId: string, filePath: string): Promise<void> {
-        if (!this.kvClient) {
+        if (!this.kvClient || !hasPublish(this.kvClient)) {
             return;
         }
 
@@ -229,7 +230,7 @@ export class ContainerPluginScheduler extends EventEmitter {
                 filePath,
                 timestamp: Date.now()
             });
-            await (this.kvClient as any).publish('meta-sort:plugin:complete', message);
+            await this.kvClient.publish('meta-sort:plugin:complete', message);
         } catch (error) {
             // Silent fail - pub/sub is optional
         }
@@ -867,7 +868,7 @@ export class ContainerPluginScheduler extends EventEmitter {
             );
 
             // Store existing metadata in task for dispatch
-            (task as any).existingMeta = existingMeta;
+            (task as ExtendedContainerTask).existingMeta = existingMeta;
 
             this.enqueueTask(task);
         }
