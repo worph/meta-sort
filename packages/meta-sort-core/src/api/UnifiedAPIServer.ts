@@ -988,6 +988,7 @@ export class UnifiedAPIServer {
         url: string;
         api: string;
         status: string;
+        role?: string;
       }> = [];
 
       try {
@@ -1001,6 +1002,7 @@ export class UnifiedAPIServer {
               url: svc.baseUrl || '',
               api: svc.baseUrl || '',
               status: svc.status || 'unknown',
+              role: svc.role,
             });
           }
         }

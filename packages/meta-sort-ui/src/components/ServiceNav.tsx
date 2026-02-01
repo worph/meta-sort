@@ -7,6 +7,7 @@ interface ServiceInfo {
   status: string;
   capabilities: string[];
   version: string;
+  role?: string; // "leader", "follower", or undefined (for non-meta-core services)
 }
 
 interface ServicesResponse {
@@ -55,7 +56,11 @@ function ServiceNav() {
 
   if (loading) return null;
 
-  const sortedServices = [...services].sort((a, b) => a.name.localeCompare(b.name));
+  // Filter out follower meta-core instances (only show leader)
+  const filteredServices = services.filter(
+    s => s.name !== 'meta-core' || s.role === 'leader'
+  );
+  const sortedServices = [...filteredServices].sort((a, b) => a.name.localeCompare(b.name));
 
   if (sortedServices.length === 0) return null;
 

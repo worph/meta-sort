@@ -41,6 +41,37 @@ export function hasPublish(client: IKVClient): client is IKVClientWithPubSub {
     return typeof (client as IKVClientWithPubSub).publish === 'function';
 }
 
+/**
+ * IKVClient with Redis Streams capabilities
+ *
+ * Redis Streams provide reliable event delivery with persistence,
+ * consumer groups, and replay capabilities. Preferred over pub/sub
+ * for service-to-service communication.
+ */
+export interface IKVClientWithStreams extends IKVClient {
+    /**
+     * Add an entry to a Redis stream
+     *
+     * @param stream - Stream name (e.g., 'meta-sort:events')
+     * @param maxlen - Maximum stream length (approximate, uses ~ for efficiency)
+     * @param fields - Object containing field-value pairs to add
+     * @returns The ID of the added entry
+     */
+    xadd(stream: string, maxlen: number, fields: Record<string, string>): Promise<string>;
+
+    /**
+     * Get the underlying Redis client (implementation-specific)
+     */
+    getRedisClient?(): unknown;
+}
+
+/**
+ * Type guard to check if a KVClient supports Redis Streams
+ */
+export function hasStreamSupport(client: IKVClient): client is IKVClientWithStreams {
+    return typeof (client as IKVClientWithStreams).xadd === 'function';
+}
+
 // =============================================================================
 // HashMeta Extensions
 // =============================================================================

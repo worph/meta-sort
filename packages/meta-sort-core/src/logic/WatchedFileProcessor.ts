@@ -15,7 +15,11 @@ import {VirtualFileSystem} from "../api/VirtualFileSystem.js";
 import {performanceMetrics} from "../metrics/PerformanceMetrics.js";
 import {UnifiedProcessingStateManager} from "./UnifiedProcessingStateManager.js";
 import type {IKVClient} from "../kv/IKVClient.js";
-import { hasPublish, type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
+import { hasStreamSupport, type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
+
+// Redis Streams for reliable event delivery
+const EVENTS_STREAM = 'meta-sort:events';
+const STREAM_MAXLEN = 10000;
 import PQueue from "p-queue";
 import os from 'os';
 import { TaskScheduler, createTaskScheduler, MetadataNodeKVStore } from "../plugin-engine/index.js";
@@ -244,25 +248,28 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     }
 
     /**
-     * Publish plugin completion event to Redis
-     * Channel: meta-sort:plugin:complete
+     * Publish plugin completion event to Redis Streams
      */
     private async publishPluginComplete(fileHash: string, pluginId: string, filePath: string): Promise<void> {
         const kvClient = this.getKVClient();
-        if (!kvClient || !hasPublish(kvClient)) {
+        if (!kvClient || !hasStreamSupport(kvClient)) {
             return;
         }
 
         try {
-            const message = JSON.stringify({
+            const payload = JSON.stringify({
                 fileHash,
                 pluginId,
                 filePath,
                 timestamp: Date.now()
             });
-            await kvClient.publish('meta-sort:plugin:complete', message);
+            await kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
+                type: 'plugin:complete',
+                payload,
+                timestamp: Date.now().toString()
+            });
         } catch (error) {
-            // Silent fail - pub/sub is optional
+            // Silent fail - stream publish is optional
         }
     }
 

@@ -2,12 +2,14 @@ import * as path from 'path';
 import PQueue from 'p-queue';
 import {PipelineConfig} from './PipelineConfig.js';
 import {performanceMetrics} from '../../metrics/PerformanceMetrics.js';
+import { hasStreamSupport } from '../../types/ExtendedInterfaces.js';
 
-// Pub/sub channel for batched updates to meta-fuse
-const UPDATE_CHANNEL = 'meta-sort:file:batch';
+// Redis Streams for reliable event delivery to meta-fuse
+// Single stream with type field for all event types (batch, reset, plugin:complete)
+const EVENTS_STREAM = 'meta-sort:events';
 
-// Pub/sub channel for scan reset notification
-const RESET_CHANNEL = 'meta-sort:scan:reset';
+// Maximum stream length (approximate, ~10000 entries provides hours of history)
+const STREAM_MAXLEN = 10000;
 
 // Batch update interval (5 seconds)
 const BATCH_INTERVAL_MS = 5000;
@@ -24,7 +26,7 @@ interface BatchChange {
  *
  * With midhash256 being instant (< 1s), files appear in VFS immediately
  *
- * Publishes batched updates to meta-fuse via Redis pub/sub every 5 seconds.
+ * Publishes batched updates to meta-fuse via Redis Streams every 5 seconds.
  */
 export class StreamingPipeline {
     private validationQueue: PQueue;
@@ -37,7 +39,7 @@ export class StreamingPipeline {
     private fastProcessedCount = 0;
     private backgroundProcessedCount = 0;
 
-    // Batch buffer for pub/sub notifications
+    // Batch buffer for stream notifications
     private batchBuffer: BatchChange[] = [];
     private batchTimer: NodeJS.Timeout | null = null;
 
@@ -100,7 +102,7 @@ export class StreamingPipeline {
     }
 
     /**
-     * Flush the batch buffer and publish to Redis
+     * Flush the batch buffer and publish to Redis Streams
      */
     private async flushBatch(): Promise<void> {
         if (this.batchBuffer.length === 0) {
@@ -112,13 +114,17 @@ export class StreamingPipeline {
 
         try {
             const kvClient = this.config.kvClient;
-            if (kvClient && typeof (kvClient as any).publish === 'function') {
-                const message = JSON.stringify({
+            if (kvClient && hasStreamSupport(kvClient)) {
+                const payload = JSON.stringify({
                     timestamp: Date.now(),
                     changes
                 });
-                await (kvClient as any).publish(UPDATE_CHANNEL, message);
-                console.log(`[Pipeline] Published batch update: ${changes.length} changes`);
+                await kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
+                    type: 'batch',
+                    payload,
+                    timestamp: Date.now().toString()
+                });
+                console.log(`[Pipeline] Published batch update to stream: ${changes.length} changes`);
             }
         } catch (error: any) {
             // Put changes back in buffer on failure
@@ -423,15 +429,19 @@ export class StreamingPipeline {
         // Clear state manager (discovered, processing, done states)
         this.config.stateManager.clear();
 
-        // Publish reset event to notify meta-fuse
-        if (this.config.kvClient && typeof (this.config.kvClient as any).publish === 'function') {
+        // Publish reset event to Redis Streams to notify meta-fuse
+        if (this.config.kvClient && hasStreamSupport(this.config.kvClient)) {
             try {
-                const message = JSON.stringify({
+                const payload = JSON.stringify({
                     timestamp: Date.now(),
                     action: 'reset'
                 });
-                await (this.config.kvClient as any).publish(RESET_CHANNEL, message);
-                console.log('[Pipeline] Reset event published to meta-fuse');
+                await this.config.kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
+                    type: 'reset',
+                    payload,
+                    timestamp: Date.now().toString()
+                });
+                console.log('[Pipeline] Reset event published to stream');
             } catch (error) {
                 console.error('[Pipeline] Failed to publish reset event:', error);
             }

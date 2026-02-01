@@ -184,4 +184,7 @@ export interface ServiceInfo {
 
     /** Last heartbeat timestamp (ISO string) */
     lastHeartbeat: string;
+
+    /** Role for meta-core instances: 'leader', 'follower', or undefined for other services */
+    role?: string;
 }

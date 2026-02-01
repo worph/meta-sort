@@ -130,8 +130,7 @@ export class KVManager {
         // Start watching for leader changes
         this.leaderClient.startWatching();
 
-        // Initialize service discovery (meta-core handles actual registration)
-        // We keep this for service discovery (reading other services)
+        // Initialize and start service discovery for registration and heartbeat
         const apiUrl = this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`;
         this.serviceDiscovery = new ServiceDiscovery({
             metaCorePath: this.config.metaCorePath,
@@ -139,7 +138,7 @@ export class KVManager {
             version: '1.0.0',
             apiUrl
         });
-        // Note: We don't start ServiceDiscovery - meta-core handles registration
+        await this.serviceDiscovery.start();
 
         this.isStarted = true;
         this.notifyReady();

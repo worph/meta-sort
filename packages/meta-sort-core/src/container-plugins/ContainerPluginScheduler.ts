@@ -19,8 +19,12 @@ import type {
 } from './types.js';
 import type { TaskQueueType } from '../plugin-engine/types.js';
 import type { IKVClient } from '../kv/IKVClient.js';
-import { hasPublish, type ExtendedContainerTask } from '../types/ExtendedInterfaces.js';
+import { hasStreamSupport, type ExtendedContainerTask } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
+
+// Redis Streams for reliable event delivery
+const EVENTS_STREAM = 'meta-sort:events';
+const STREAM_MAXLEN = 10000;
 
 /**
  * Scheduler events
@@ -212,27 +216,30 @@ export class ContainerPluginScheduler extends EventEmitter {
     }
 
     /**
-     * Publish plugin completion event to Redis
-     * Channel: meta-sort:plugin:complete
+     * Publish plugin completion event to Redis Streams
      *
-     * External services (like meta-stremio) can subscribe to this channel
+     * External services (like meta-fuse, meta-stremio) consume this stream
      * to be notified when specific plugins complete for a file.
      */
     private async publishPluginComplete(fileHash: string, pluginId: string, filePath: string): Promise<void> {
-        if (!this.kvClient || !hasPublish(this.kvClient)) {
+        if (!this.kvClient || !hasStreamSupport(this.kvClient)) {
             return;
         }
 
         try {
-            const message = JSON.stringify({
+            const payload = JSON.stringify({
                 fileHash,
                 pluginId,
                 filePath,
                 timestamp: Date.now()
             });
-            await this.kvClient.publish('meta-sort:plugin:complete', message);
+            await this.kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
+                type: 'plugin:complete',
+                payload,
+                timestamp: Date.now().toString()
+            });
         } catch (error) {
-            // Silent fail - pub/sub is optional
+            // Silent fail - stream publish is optional
         }
     }
 

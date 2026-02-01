@@ -339,6 +339,39 @@ export class RedisKVClient implements IKVClient {
     }
 
     // ========================================================================
+    // Redis Streams Operations
+    // ========================================================================
+
+    /**
+     * Add an entry to a Redis stream
+     * Used for reliable event delivery between services (replaces pub/sub)
+     *
+     * @param stream - Stream name (e.g., 'meta-sort:events')
+     * @param maxlen - Maximum stream length (approximate, uses ~ for efficiency)
+     * @param fields - Object containing field-value pairs to add
+     * @returns The ID of the added entry
+     */
+    async xadd(stream: string, maxlen: number, fields: Record<string, string>): Promise<string> {
+        // Convert fields object to flat array for ioredis
+        const fieldArray: string[] = [];
+        for (const [key, value] of Object.entries(fields)) {
+            fieldArray.push(key, value);
+        }
+
+        // Use XADD with MAXLEN ~ for approximate trimming (more efficient)
+        const result = await this.redis.xadd(
+            stream,
+            'MAXLEN',
+            '~',
+            maxlen.toString(),
+            '*',
+            ...fieldArray
+        );
+
+        return result as string;
+    }
+
+    // ========================================================================
     // Lifecycle
     // ========================================================================
 
