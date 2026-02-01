@@ -988,8 +988,6 @@ export class UnifiedAPIServer {
         url: string;
         api: string;
         status: string;
-        capabilities: string[];
-        version: string;
       }> = [];
 
       try {
@@ -998,17 +996,11 @@ export class UnifiedAPIServer {
           const allServices = await serviceDiscovery.discoverAllServices();
 
           for (const svc of allServices) {
-            // Build dashboard URL from API URL
-            const apiUrl = svc.api || '';
-            const dashboardPath = svc.endpoints?.dashboard || '/';
-
             services.push({
               name: svc.name || 'Unknown',
-              url: apiUrl + dashboardPath,
-              api: apiUrl,
+              url: svc.baseUrl || '',
+              api: svc.baseUrl || '',
               status: svc.status || 'unknown',
-              capabilities: svc.capabilities || [],
-              version: svc.version || '',
             });
           }
         }
@@ -1018,17 +1010,17 @@ export class UnifiedAPIServer {
 
       // Get leader info
       const leaderInfo = this.kvManager!.getLeaderInfo();
-      const isLeader = this.kvManager!.isLeader();
 
       return {
         services,
         current: 'meta-sort',
         leader: leaderInfo ? {
-          host: leaderInfo.host,
-          api: leaderInfo.api,
-          http: leaderInfo.http,
+          hostname: leaderInfo.hostname,
+          baseUrl: leaderInfo.baseUrl,
+          apiUrl: leaderInfo.apiUrl,
+          redisUrl: leaderInfo.redisUrl,
+          webdavUrl: leaderInfo.webdavUrl,
         } : null,
-        isLeader,
       };
     });
   }

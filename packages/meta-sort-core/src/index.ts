@@ -141,26 +141,22 @@ process.on('SIGINT', async () => {
 // Start initial discovery and processing (streaming pipeline)
 (async () => {
     try {
-        // Validate META_CORE_URL is configured
-        if (!config.META_CORE_URL) {
-            console.error('[Startup] ERROR: META_CORE_URL is required. Set META_CORE_URL environment variable.');
-            console.error('[Startup] Example: META_CORE_URL=http://meta-core');
+        // Validate META_CORE_PATH is configured (required for leader discovery)
+        if (!config.META_CORE_PATH) {
+            console.error('[Startup] ERROR: META_CORE_PATH is required. Set META_CORE_PATH environment variable.');
+            console.error('[Startup] Example: META_CORE_PATH=/meta-core');
             process.exit(1);
         }
 
-        // Initialize KV Manager if configured (Redis + leader election)
+        // Initialize KV Manager (Redis via leader discovery)
         if (config.META_CORE_PATH) {
-            console.log('[Startup] Initializing KV Manager (Redis + leader election)...');
+            console.log('[Startup] Initializing KV Manager (leader discovery)...');
             kvManager = new KVManager({
                 metaCorePath: config.META_CORE_PATH,
                 filesPath: config.FILES_PATH,
                 serviceName: config.SERVICE_NAME,
-                version: config.SERVICE_VERSION,
                 apiPort: config.FUSE_API_PORT,
-                redisPort: config.REDIS_PORT,
-                redisUrl: config.REDIS_URL,
                 baseUrl: config.BASE_URL,
-                capabilities: ['write', 'mount', 'monitor']
             });
 
             // Wait for KV to be ready
@@ -172,7 +168,7 @@ process.on('SIGINT', async () => {
             if (client) {
                 fileProcessor.setKVClient(client);
                 pipeline.setKVClient(client);
-                console.log(`[Startup] KV Manager ready (role: ${kvManager.isLeader() ? 'LEADER' : 'FOLLOWER'})`);
+                console.log('[Startup] KV Manager ready');
             }
         }
 
@@ -266,9 +262,17 @@ process.on('SIGINT', async () => {
         }
 
         // Connect to meta-core for file events via SSE (Architecture V3)
-        console.log(`[Startup] Connecting to meta-core at ${config.META_CORE_URL}...`);
+        // Get meta-core URL from leader discovery
+        const leaderInfo = kvManager?.getLeaderInfo();
+        if (!leaderInfo) {
+            console.error('[Startup] ERROR: No leader info available. Cannot connect to meta-core.');
+            console.error('[Startup] Make sure meta-core is running and kv-leader.info exists.');
+            process.exit(1);
+        }
+        const metaCoreUrl = leaderInfo.baseUrl;
+        console.log(`[Startup] Connecting to meta-core at ${metaCoreUrl}...`);
         eventSubscriber = new EventSubscriber({
-            metaCoreUrl: config.META_CORE_URL,
+            metaCoreUrl: metaCoreUrl,
             pipeline: pipeline,
             requestInitialScan: true, // Request initial scan from meta-core
             reconnectDelayMs: 5000,

@@ -139,20 +139,24 @@ export interface KVClientConfig {
 }
 
 /**
- * Leader lock file content format
+ * Leader lock file content format (kv-leader.info)
+ * Written by meta-core leader, read by other services
  */
 export interface LeaderLockInfo {
     /** Hostname of the leader */
-    host: string;
+    hostname: string;
+
+    /** Base URL for the leader service (e.g., http://localhost:8180) */
+    baseUrl: string;
+
+    /** meta-core API URL (port 9000) */
+    apiUrl: string;
 
     /** Redis connection URL (e.g., redis://10.0.1.50:6379) */
-    api: string;
+    redisUrl: string;
 
-    /** HTTP API URL for the leader service */
-    http: string;
-
-    /** Configured BASE_URL for stable service discovery (optional, falls back to http) */
-    baseUrl?: string;
+    /** WebDAV URL for file access */
+    webdavUrl: string;
 
     /** Timestamp when leadership was acquired */
     timestamp: number;
@@ -162,36 +166,22 @@ export interface LeaderLockInfo {
 }
 
 /**
- * Service registration info
+ * Service registration info (simplified)
+ * Full URLs are obtained via the /urls API endpoint
  */
 export interface ServiceInfo {
     /** Service name (e.g., 'meta-sort', 'meta-fuse') */
     name: string;
 
-    /** Service version */
-    version: string;
-
-    /** HTTP API URL */
-    api: string;
-
-    /** Current status */
-    status: 'starting' | 'running' | 'stopping' | 'stopped';
-
-    /** Process ID */
-    pid: number;
-
     /** Hostname */
     hostname: string;
 
-    /** Start timestamp (ISO string) */
-    startedAt: string;
+    /** Base URL for the service */
+    baseUrl: string;
+
+    /** Current status */
+    status: 'running' | 'stale' | 'stopped';
 
     /** Last heartbeat timestamp (ISO string) */
     lastHeartbeat: string;
-
-    /** Service capabilities */
-    capabilities: string[];
-
-    /** Named endpoints */
-    endpoints: Record<string, string>;
 }

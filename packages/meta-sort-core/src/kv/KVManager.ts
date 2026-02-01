@@ -1,11 +1,14 @@
 /**
- * KV Manager - Unified manager for KV storage, leader election, and service discovery
+ * KV Manager - Unified manager for KV storage and service discovery
  *
  * This is the main entry point for the KV subsystem. It:
- * 1. Participates in leader election (spawns Redis if leader)
+ * 1. Uses LeaderClient to read leader info from meta-core
  * 2. Creates and manages the KV client (Redis)
  * 3. Handles service discovery registration
- * 4. Manages reconnection on leader failure
+ * 4. Manages reconnection on leader changes
+ *
+ * Note: Leader election is now handled by meta-core (Go sidecar).
+ * This service only reads the leader info and connects to Redis.
  *
  * Usage:
  * ```typescript
@@ -23,8 +26,8 @@
  * ```
  */
 
-import { networkInterfaces } from 'os';
-import { LeaderElection } from './LeaderElection.js';
+import { hostname } from 'os';
+import { LeaderClient } from './LeaderClient.js';
 import { ServiceDiscovery } from './ServiceDiscovery.js';
 import { RedisKVClient } from './RedisClient.js';
 import type { IKVClient, LeaderLockInfo } from './IKVClient.js';
@@ -39,34 +42,22 @@ interface KVManagerConfig {
     /** Service name (e.g., 'meta-sort', 'meta-fuse') */
     serviceName: string;
 
-    /** Service version */
-    version?: string;
-
     /** HTTP API port */
     apiPort: number;
-
-    /** Redis port (default: 6379) */
-    redisPort?: number;
-
-    /** Service capabilities */
-    capabilities?: string[];
-
-    /** Whether to skip leader election and use provided Redis URL */
-    redisUrl?: string;
 
     /** Base URL for service discovery (overrides auto-detected URL) */
     baseUrl?: string;
 
-    /**
-     * Hostname to advertise in lock file for other services to connect.
-     * Use Docker service name (e.g., 'meta-sort-dev') for stable DNS resolution.
-     */
-    advertiseHost?: string;
+    /** Optional direct Redis URL (bypasses leader discovery) */
+    redisUrl?: string;
+
+    /** meta-core API URL (e.g., http://localhost:9000) */
+    metaCoreUrl?: string;
 }
 
 export class KVManager {
     private config: KVManagerConfig;
-    private leaderElection: LeaderElection | null = null;
+    private leaderClient: LeaderClient | null = null;
     private serviceDiscovery: ServiceDiscovery | null = null;
     private kvClient: IKVClient | null = null;
     private isStarted = false;
@@ -77,32 +68,7 @@ export class KVManager {
     private onReconnectCallbacks: (() => void)[] = [];
 
     constructor(config: KVManagerConfig) {
-        this.config = {
-            version: '1.0.0',
-            redisPort: 6379,
-            capabilities: [],
-            ...config
-        };
-    }
-
-    /**
-     * Get the local IP for API URL construction
-     */
-    private getLocalIP(): string {
-        const interfaces = networkInterfaces();
-
-        for (const name of Object.keys(interfaces)) {
-            const addrs = interfaces[name];
-            if (!addrs) continue;
-
-            for (const addr of addrs) {
-                if (addr.family === 'IPv4' && !addr.internal) {
-                    return addr.address;
-                }
-            }
-        }
-
-        return 'localhost';
+        this.config = config;
     }
 
     /**
@@ -130,106 +96,86 @@ export class KVManager {
 
         console.log(`[KVManager] Starting for ${this.config.serviceName}...`);
 
-        // Check for direct Redis URL (skip leader election)
+        // Check for direct Redis URL (skip leader discovery)
         if (this.config.redisUrl) {
             console.log(`[KVManager] Using direct Redis URL: ${this.config.redisUrl}`);
             this.kvClient = await this.createRedisClient(this.config.redisUrl);
-
-            // NOTE: Service discovery is handled by Go meta-core sidecar
-            // The Go binary writes to /meta-core/services/{serviceName}.json with correct internal IPs
-            // TypeScript ServiceDiscovery would overwrite with external BASE_URL, breaking internal discovery
-            // Keep ServiceDiscovery instance for reading/discovery only, but don't call start()
-            const apiUrl = this.config.baseUrl || `http://localhost:${this.config.apiPort}`;
-            this.serviceDiscovery = new ServiceDiscovery({
-                metaCorePath: this.config.metaCorePath,
-                serviceName: this.config.serviceName,
-                version: this.config.version!,
-                apiUrl,
-                capabilities: this.config.capabilities,
-                endpoints: {
-                    health: '/health',
-                    dashboard: '/',
-                    api: '/api',
-                    metrics: '/api/metrics',
-                    processing: '/api/processing/status'
-                }
-            });
-            // Don't call start() - Go meta-core handles registration
-            // await this.serviceDiscovery.start();
-
             this.isStarted = true;
             this.notifyReady();
             return;
         }
 
-        // Initialize leader election
-        const localIP = this.getLocalIP();
-
-        this.leaderElection = new LeaderElection({
+        // Initialize leader client
+        this.leaderClient = new LeaderClient({
             metaCorePath: this.config.metaCorePath,
-            serviceName: this.config.serviceName,
-            apiPort: this.config.apiPort,
-            redisPort: this.config.redisPort,
-            baseUrl: this.config.baseUrl
+            metaCoreUrl: this.config.metaCoreUrl
         });
 
-        // Setup leader election callbacks
-        this.leaderElection.onLeader(async () => {
-            console.log('[KVManager] We are the leader, connecting to local Redis...');
-
-            // Connect to local Redis (spawned by leader election)
-            const redisUrl = `redis://127.0.0.1:${this.config.redisPort}`;
-            this.kvClient = await this.createRedisClient(redisUrl);
-
-            this.notifyReady();
+        // Watch for leader changes
+        this.leaderClient.onChange(async () => {
+            console.log('[KVManager] Leader changed, reconnecting...');
+            await this.reconnect();
         });
 
-        this.leaderElection.onFollower(async (leaderInfo: LeaderLockInfo) => {
-            console.log(`[KVManager] We are a follower, connecting to leader at ${leaderInfo.api}...`);
+        // Wait for leader and connect
+        try {
+            const leaderInfo = await this.leaderClient.waitForLeader(30000);
+            console.log(`[KVManager] Connecting to Redis at ${leaderInfo.redisUrl}...`);
+            this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
+        } catch (error) {
+            console.error('[KVManager] Failed to connect to leader:', error);
+            throw error;
+        }
 
-            // Connect to leader's Redis
-            this.kvClient = await this.createRedisClient(leaderInfo.api);
+        // Start watching for leader changes
+        this.leaderClient.startWatching();
 
-            this.notifyReady();
-        });
-
-        this.leaderElection.onLostLeader(async () => {
-            console.log('[KVManager] Leader lost, disconnecting...');
-
-            if (this.kvClient) {
-                await this.kvClient.close();
-                this.kvClient = null;
-            }
-
-            // Leader election will handle re-election and reconnection
-        });
-
-        // Initialize service discovery
-        // Use BASE_URL if provided, otherwise fall back to auto-detected local IP
-        const apiUrl = this.config.baseUrl || `http://${localIP}:${this.config.apiPort}`;
-
+        // Initialize service discovery (meta-core handles actual registration)
+        // We keep this for service discovery (reading other services)
+        const apiUrl = this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`;
         this.serviceDiscovery = new ServiceDiscovery({
             metaCorePath: this.config.metaCorePath,
             serviceName: this.config.serviceName,
-            version: this.config.version!,
-            apiUrl,
-            capabilities: this.config.capabilities,
-            endpoints: {
-                health: '/health',
-                dashboard: '/',
-                api: '/api',
-                metrics: '/api/metrics',
-                processing: '/api/processing/status'
-            }
+            version: '1.0.0',
+            apiUrl
         });
-
-        // Start leader election first
-        await this.leaderElection.start();
-
-        // Start service discovery
-        await this.serviceDiscovery.start();
+        // Note: We don't start ServiceDiscovery - meta-core handles registration
 
         this.isStarted = true;
+        this.notifyReady();
+    }
+
+    /**
+     * Reconnect to Redis after leader change
+     */
+    private async reconnect(): Promise<void> {
+        if (this.isShuttingDown || !this.leaderClient) {
+            return;
+        }
+
+        // Close existing connection
+        if (this.kvClient) {
+            await this.kvClient.close();
+            this.kvClient = null;
+        }
+
+        // Wait for new leader
+        try {
+            const leaderInfo = await this.leaderClient.waitForLeader(30000);
+            console.log(`[KVManager] Reconnecting to Redis at ${leaderInfo.redisUrl}...`);
+            this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
+
+            // Notify reconnect callbacks
+            for (const callback of this.onReconnectCallbacks) {
+                try {
+                    callback();
+                } catch (error) {
+                    console.error('[KVManager] Error in reconnect callback:', error);
+                }
+            }
+        } catch (error) {
+            console.error('[KVManager] Failed to reconnect:', error);
+        }
     }
 
     /**
@@ -241,10 +187,10 @@ export class KVManager {
         console.log('[KVManager] Stopping...');
         this.isShuttingDown = true;
 
-        // Stop service discovery
-        if (this.serviceDiscovery) {
-            await this.serviceDiscovery.stop();
-            this.serviceDiscovery = null;
+        // Stop leader client
+        if (this.leaderClient) {
+            this.leaderClient.close();
+            this.leaderClient = null;
         }
 
         // Close KV client
@@ -253,10 +199,10 @@ export class KVManager {
             this.kvClient = null;
         }
 
-        // Stop leader election (releases lock, stops Redis if leader)
-        if (this.leaderElection) {
-            await this.leaderElection.stop();
-            this.leaderElection = null;
+        // Service discovery stop (if it was started)
+        if (this.serviceDiscovery) {
+            await this.serviceDiscovery.stop();
+            this.serviceDiscovery = null;
         }
 
         this.isStarted = false;
@@ -338,24 +284,17 @@ export class KVManager {
     }
 
     /**
-     * Check if this service is the leader
-     */
-    isLeader(): boolean {
-        return this.leaderElection?.isLeader() ?? false;
-    }
-
-    /**
-     * Check if this service is a follower
-     */
-    isFollower(): boolean {
-        return this.leaderElection?.isFollower() ?? false;
-    }
-
-    /**
      * Get the current leader info
      */
     getLeaderInfo(): LeaderLockInfo | null {
-        return this.leaderElection?.getLeaderInfo() ?? null;
+        return this.leaderClient?.getCachedLeaderInfo() ?? null;
+    }
+
+    /**
+     * Get the leader client
+     */
+    getLeaderClient(): LeaderClient | null {
+        return this.leaderClient;
     }
 
     /**
