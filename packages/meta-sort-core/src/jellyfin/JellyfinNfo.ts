@@ -1,10 +1,9 @@
-import {readFile, writeFile} from 'fs/promises';
 import {Builder, Parser} from 'xml2js';
 import {mergeMetadata} from "../logic/tool/MetadataMerger.js";
-import {existsAsync} from "@metazla/meta-hash";
 import {VideoMeta, JellyfinMeta, FileStatMeta} from "@metazla/meta-interface";
 import lodash from 'lodash';
 import * as xml2js from "xml2js";
+import * as webdav from '../webdav/WebdavClient.js';
 
 export class JellyfinNfo {
 
@@ -61,9 +60,9 @@ export class JellyfinNfo {
             throw new Error(`NFO file path must end with '.nfo'`);
         }
         let metadata: T = {} as T;
-        if (await existsAsync(nfoPath)) {
+        const nfoContent = await webdav.readTextFile(nfoPath);
+        if (nfoContent) {
             try {
-                const nfoContent = await readFile(nfoPath, {encoding: 'utf8'});
                 const parser = new xml2js.Parser(this.options);
                 const result = await parser.parseStringPromise(nfoContent);
                 metadata = result.root || result.episodedetails || result.movie || {};
@@ -85,7 +84,7 @@ export class JellyfinNfo {
         if (data.fileType !== "video") {
             return;//only process video files for writing jellyfin nfo
         }
-        if (await existsAsync(nfoPath)) {
+        if (await webdav.exists(nfoPath)) {
             await this.updateNfoFile(nfoPath, data as any);
         } else {
             throw new Error(`NFO file does not exist at path: ${nfoPath}`);
@@ -100,7 +99,7 @@ export class JellyfinNfo {
         if (data.fileType !== "video") {
             return;//only process video files for writing jellyfin nfo
         }
-        if (await existsAsync(nfoPath)) {
+        if (await webdav.exists(nfoPath)) {
             await this.updateNfoFile(nfoPath, data as any);
         } else {
             // If the NFO file doesn't exist, just generate a new one
@@ -146,7 +145,11 @@ export class JellyfinNfo {
 
     private async updateNfoFile(nfoFilePath: string, data: JellyfinMeta) {
         try {
-            const existingContent = await readFile(nfoFilePath, {encoding: "utf-8"});
+            const existingContent = await webdav.readTextFile(nfoFilePath);
+            if (!existingContent) {
+                console.error(`Failed to read NFO content from ${nfoFilePath}`);
+                return;
+            }
             const parser = new Parser(this.options);
             let existingData = await parser.parseStringPromise(existingContent);
             let hasChanged = false;
@@ -184,7 +187,7 @@ export class JellyfinNfo {
                 // Convert the updated object back to XML
                 try {
                     const updatedContent = builder.buildObject(existingData);
-                    await writeFile(nfoFilePath, updatedContent, {encoding: "utf-8"});
+                    await webdav.writeFile(nfoFilePath, updatedContent);
                 } catch (error) {
                     console.error(`Failed to write updated NFO content to ${nfoFilePath} : ${error}`);
                 }
@@ -247,7 +250,7 @@ export class JellyfinNfo {
         if (!nfoFilePath.endsWith('.nfo')) {
             throw new Error(`NFO file path must end with '.nfo'`);
         }
-        if (await existsAsync(nfoFilePath)) {
+        if (await webdav.exists(nfoFilePath)) {
             throw new Error(`NFO file already exists at path: ${nfoFilePath}`);
         }
 
@@ -271,7 +274,7 @@ export class JellyfinNfo {
 
         const builder = new Builder({xmldec: {version: '1.0', encoding: 'UTF-8', standalone: true}});
         const nfoContent = builder.buildObject(obj);
-        await writeFile(nfoFilePath, nfoContent, {encoding: "utf-8"});
+        await webdav.writeFile(nfoFilePath, nfoContent);
     }
 
 }

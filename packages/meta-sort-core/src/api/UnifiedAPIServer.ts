@@ -16,6 +16,7 @@ import type { KVManager } from '../kv/KVManager.js';
 import type { ExtendedProcessingSnapshot, IKVClientWithPubSub } from '../types/ExtendedInterfaces.js';
 import { getErrorMessage } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
+import * as webdav from '../webdav/WebdavClient.js';
 import type { PluginManager } from '../plugin-engine/PluginManager.js';
 import type { TaskScheduler } from '../plugin-engine/TaskScheduler.js';
 import type { ContainerManager, ContainerPluginScheduler, PluginCallbackPayload, GateStatus } from '../container-plugins/index.js';
@@ -237,7 +238,7 @@ export class UnifiedAPIServer {
    * Setup File download routes
    */
   private setupFileRoutes(): void {
-    // Download file by path
+    // Download file by path (via WebDAV)
     this.app.get<{ Querystring: { path: string } }>('/api/file/download', async (request, reply) => {
       const { path: filePath } = request.query;
 
@@ -246,8 +247,12 @@ export class UnifiedAPIServer {
       }
 
       try {
-        const fs = await import('fs');
         const pathModule = await import('path');
+
+        // Check if WebDAV is configured
+        if (!webdav.isConfigured()) {
+          return reply.status(503).send({ error: 'WebDAV not configured - waiting for leader discovery' });
+        }
 
         // Security: ensure the path is within FILES_PATH
         const filesPath = config.FILES_PATH;
@@ -257,15 +262,10 @@ export class UnifiedAPIServer {
           return reply.status(403).send({ error: 'Access denied - path outside files directory' });
         }
 
-        // Check if file exists
-        if (!fs.existsSync(absolutePath)) {
+        // Get file stats via WebDAV
+        const stats = await webdav.stat(absolutePath);
+        if (!stats || !stats.exists) {
           return reply.status(404).send({ error: 'File not found' });
-        }
-
-        // Get file stats
-        const stats = fs.statSync(absolutePath);
-        if (!stats.isFile()) {
-          return reply.status(400).send({ error: 'Path is not a file' });
         }
 
         // Set headers for download
@@ -274,8 +274,11 @@ export class UnifiedAPIServer {
         reply.header('Content-Type', 'application/octet-stream');
         reply.header('Content-Length', stats.size);
 
-        // Stream the file
-        const stream = fs.createReadStream(absolutePath);
+        // Stream the file from WebDAV
+        const stream = await webdav.createReadStream(absolutePath);
+        if (!stream) {
+          return reply.status(500).send({ error: 'Failed to create file stream' });
+        }
         return reply.send(stream);
       } catch (error) {
         console.error('Error downloading file:', error);

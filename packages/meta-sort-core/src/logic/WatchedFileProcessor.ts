@@ -1,11 +1,9 @@
-import {promises as fs} from 'fs';
 import {dirname, join, parse} from 'path';
 import {config} from "../config/EnvConfig.js";
 import {FileProcessorInterface} from "@metazla/meta-hash";
 import {MetaDataToFolderStruct} from "./MetaDataToFolderStruct.js";
 import {DuplicateFinder, DuplicateResult} from "./DuplicateFinder.js";
 import {FileType} from "@metazla/filename-tools";
-import {existsAsync} from "@metazla/meta-hash";
 import {FileAnalyzerInterface} from "./fileProcessor/FileAnalyzerInterface.js";
 import {FileProcessorPiscina} from "./fileProcessor/FileProcessorPiscina.js";
 import {renamingRule} from "../config/RenamingRule.js";
@@ -16,6 +14,7 @@ import {performanceMetrics} from "../metrics/PerformanceMetrics.js";
 import {UnifiedProcessingStateManager} from "./UnifiedProcessingStateManager.js";
 import type {IKVClient} from "../kv/IKVClient.js";
 import { hasStreamSupport, type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
+import * as webdav from '../webdav/WebdavClient.js';
 
 // Redis Streams for reliable event delivery
 const EVENTS_STREAM = 'meta-sort:events';
@@ -25,7 +24,6 @@ import os from 'os';
 import { TaskScheduler, createTaskScheduler, MetadataNodeKVStore } from "../plugin-engine/index.js";
 import { initializePluginManager } from "./fileProcessor/FileProcessorPiscina.js";
 import { from } from "@metazla/meta-interface";
-import { stat } from "fs/promises";
 import type { StreamingPipeline } from "./pipeline/StreamingPipeline.js";
 
 export class WatchedFileProcessor implements FileProcessorInterface {
@@ -313,8 +311,15 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 }
 
                 // STEP 1: Compute midhash256 (file identifier)
-                const fileStats = await stat(filePath);
-                const { computeMidHash256 } = await import('@metazla/meta-hash');
+                // Use WebDAV for file stats and hash computation
+                const fileStats = await webdav.stat(filePath);
+                if (!fileStats || !fileStats.exists) {
+                    console.error(`[WatchedFileProcessor] File not found via WebDAV: ${filePath}`);
+                    if (this.unifiedStateManager) {
+                        this.unifiedStateManager.completeLightProcessing(filePath, '', undefined, 'File not found');
+                    }
+                    return;
+                }
 
                 // Check cache first
                 const extAnalyzer = this.fileProcessor as ExtendedFileAnalyzer;
@@ -330,7 +335,16 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                     performanceMetrics.recordCacheHit('midhash256');
                 } else {
                     const computeStart = performance.now();
-                    midHash256 = await computeMidHash256(filePath);
+                    // Use WebDAV-based hash computation
+                    const hash = await webdav.computeMidHash256(filePath);
+                    if (!hash) {
+                        console.error(`[WatchedFileProcessor] Failed to compute hash for: ${filePath}`);
+                        if (this.unifiedStateManager) {
+                            this.unifiedStateManager.completeLightProcessing(filePath, '', undefined, 'Hash computation failed');
+                        }
+                        return;
+                    }
+                    midHash256 = hash;
                     performanceMetrics.recordHashComputation('cid_midhash256', Math.ceil(performance.now() - computeStart));
                     performanceMetrics.recordCacheMiss('midhash256');
 

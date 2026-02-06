@@ -1,11 +1,13 @@
-import { promises as fs } from 'fs';
 import yaml from 'yaml';
+import * as webdav from '../webdav/WebdavClient.js';
 const { parse, stringify } = yaml;
 /**
  * File type:
  * filename.<ext>.meta
  * filename.meta (contains multiple metadata entry "mkv", "str" etc...)
  * folder.meta
+ *
+ * All file operations use WebDAV for access to meta-core's file system.
  */
 
 export class MetaMeshFormat {
@@ -14,15 +16,15 @@ export class MetaMeshFormat {
             throw new Error(`File path must end with '.meta'`);
         }
         try {
-            // Check if the file exists
-            const fileExists = await fs.access(metaDataFilePath).then(() => true).catch(() => false);
+            // Check if the file exists via WebDAV
+            const fileExists = await webdav.exists(metaDataFilePath);
 
             if (fileExists) {
                 // If the file exists, update it
                 await this.update(metaDataFilePath, data);
             } else {
-                // If the file does not exist, create it
-                await fs.writeFile(metaDataFilePath, stringify(data), 'utf8');
+                // If the file does not exist, create it via WebDAV
+                await webdav.writeFile(metaDataFilePath, stringify(data));
             }
         } catch (error) {
             console.error(`Error in createOrUpdate: ${error}`);
@@ -30,18 +32,17 @@ export class MetaMeshFormat {
         }
     }
 
-    async read<T>(metaDataFilePath: string): Promise<T> {
+    async read<T>(metaDataFilePath: string): Promise<T | null> {
         if(!metaDataFilePath.endsWith('.meta')){
             throw new Error(`File path must end with '.meta'`);
         }
         try {
-            const fileExists = await fs.access(metaDataFilePath).then(() => true).catch(() => false);
+            // Read the YAML file via WebDAV
+            const fileContent = await webdav.readTextFile(metaDataFilePath);
 
-            if (!fileExists) {
+            if (!fileContent) {
                 return null;
             }
-            // Read the YAML file
-            const fileContent = await fs.readFile(metaDataFilePath, 'utf8');
 
             // Parse the YAML content to a JavaScript object
             return parse(fileContent) as T;
@@ -62,8 +63,8 @@ export class MetaMeshFormat {
             // Merge the existing data with the new data
             const updatedData = { ...existingData, ...data };
 
-            // Write the updated data back to the file
-            await fs.writeFile(metaDataFilePath, stringify(updatedData), 'utf8');
+            // Write the updated data back to the file via WebDAV
+            await webdav.writeFile(metaDataFilePath, stringify(updatedData));
         } catch (error) {
             console.error(`Error in update: ${error}`);
             throw error;
@@ -75,13 +76,10 @@ export class MetaMeshFormat {
             throw new Error(`File path must end with '.meta'`);
         }
         try {
-            // Write the updated data back to the file
-            await fs.writeFile(metaDataFilePath, stringify(data), {
-                encoding:'utf8',
-                flag:'w' // Write mode : Overwrite
-            });
+            // Write the data to the file via WebDAV (overwrite)
+            await webdav.writeFile(metaDataFilePath, stringify(data));
         } catch (error) {
-            console.error(`Error in update: ${error}`);
+            console.error(`Error in write: ${error}`);
             throw error;
         }
     }

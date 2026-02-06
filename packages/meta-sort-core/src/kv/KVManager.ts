@@ -31,6 +31,7 @@ import { LeaderClient } from './LeaderClient.js';
 import { ServiceDiscovery } from './ServiceDiscovery.js';
 import { RedisKVClient } from './RedisClient.js';
 import type { IKVClient, LeaderLockInfo } from './IKVClient.js';
+import { configure as configureWebdav } from '../webdav/WebdavClient.js';
 
 interface KVManagerConfig {
     /** Path to META_CORE_VOLUME (e.g., /meta-core) */
@@ -122,6 +123,11 @@ export class KVManager {
             const leaderInfo = await this.leaderClient.waitForLeader(30000);
             console.log(`[KVManager] Connecting to Redis at ${leaderInfo.redisUrl}...`);
             this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
+
+            // Configure WebDAV client with leader's WebDAV URL
+            if (leaderInfo.webdavUrl) {
+                configureWebdav(leaderInfo.webdavUrl);
+            }
         } catch (error) {
             console.error('[KVManager] Failed to connect to leader:', error);
             throw error;
@@ -163,6 +169,11 @@ export class KVManager {
             const leaderInfo = await this.leaderClient.waitForLeader(30000);
             console.log(`[KVManager] Reconnecting to Redis at ${leaderInfo.redisUrl}...`);
             this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
+
+            // Reconfigure WebDAV client with new leader's WebDAV URL
+            if (leaderInfo.webdavUrl) {
+                configureWebdav(leaderInfo.webdavUrl);
+            }
 
             // Notify reconnect callbacks
             for (const callback of this.onReconnectCallbacks) {
