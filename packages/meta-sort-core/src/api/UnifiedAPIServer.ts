@@ -38,7 +38,6 @@ export class UnifiedAPIServer {
   private getDuplicateResult: (() => DuplicateResult | null) | null = null;
   private kvClient: IKVClient | null = null;
   private kvManager: KVManager | null = null;
-  private triggerScanCallback: (() => Promise<void>) | null = null;
   private getQueueStatus: (() => any) | null = null;
   private fastQueueConcurrency: number | undefined = undefined;
   private backgroundQueueConcurrency: number | undefined = undefined;
@@ -59,7 +58,6 @@ export class UnifiedAPIServer {
     unifiedStateManager?: UnifiedProcessingStateManager,
     getDuplicateResult?: () => DuplicateResult | null,
     kvClient?: IKVClient,
-    triggerScanCallback?: () => Promise<void>,
     backgroundQueueConcurrency?: number,
     fastQueueConcurrency?: number,
     getQueueStatus?: () => any,
@@ -72,7 +70,6 @@ export class UnifiedAPIServer {
     this.getDuplicateResult = getDuplicateResult || null;
     this.kvClient = kvClient || null;
     this.kvManager = kvManager || null;
-    this.triggerScanCallback = triggerScanCallback || null;
     this.getQueueStatus = getQueueStatus || null;
     this.backgroundQueueConcurrency = backgroundQueueConcurrency;
     this.fastQueueConcurrency = fastQueueConcurrency;
@@ -724,12 +721,6 @@ export class UnifiedAPIServer {
         // Add file back to discovered state for reprocessing
         this.unifiedStateManager!.addDiscovered(filePath);
 
-        // Trigger scan callback if available to pick up the file
-        if (this.triggerScanCallback) {
-          // Don't await - just trigger async
-          this.triggerScanCallback().catch(err => console.warn('[API] Scan trigger failed during retry:', getErrorMessage(err)));
-        }
-
         return { status: 'ok', message: `File ${filePath} queued for retry` };
       } catch (error: any) {
         return reply.status(500).send({ error: error.message });
@@ -745,11 +736,6 @@ export class UnifiedAPIServer {
       for (const file of failedFiles) {
         this.unifiedStateManager!.addDiscovered(file.filePath);
         queued++;
-      }
-
-      // Trigger scan callback if available
-      if (this.triggerScanCallback) {
-        this.triggerScanCallback().catch(err => console.warn('[API] Scan trigger failed during retry-all:', getErrorMessage(err)));
       }
 
       return { status: 'ok', message: `${queued} files queued for retry` };
@@ -883,40 +869,12 @@ export class UnifiedAPIServer {
   }
 
   /**
-   * Setup Scan Trigger API routes
+   * Setup Metadata Clear API routes
+   * NOTE: /api/scan/trigger has been removed - use meta-core's endpoint instead
    */
   private setupScanRoutes(): void {
-    // Trigger manual scan
-    this.app.post('/api/scan/trigger', async (request, reply) => {
-      if (!this.triggerScanCallback) {
-        return reply.status(503).send({
-          status: 'error',
-          message: 'Scan trigger not available'
-        });
-      }
-
-      try {
-        console.log('Manual scan triggered via API');
-        // Don't await - trigger and return immediately
-        this.triggerScanCallback().catch(error => {
-          console.error('Error during triggered scan:', error);
-        });
-
-        return {
-          status: 'ok',
-          message: 'Scan triggered successfully'
-        };
-      } catch (error: any) {
-        console.error('Error triggering scan:', error);
-        return reply.status(500).send({
-          status: 'error',
-          message: 'Failed to trigger scan',
-          details: error.message
-        });
-      }
-    });
-
-    // Clear all metadata and trigger rescan
+    // Clear all metadata
+    // NOTE: To trigger a rescan after clearing, call meta-core's /api/scan/trigger endpoint
     this.app.post('/api/metadata/clear', async (request, reply) => {
       if (!this.kvClient) {
         return reply.status(503).send({
@@ -950,19 +908,10 @@ export class UnifiedAPIServer {
 
         console.log(`Cleared ${deletedCount} file metadata entries`);
 
-        // Trigger rescan if callback is available
-        if (this.triggerScanCallback) {
-          console.log('Triggering rescan after metadata clear');
-          this.triggerScanCallback().catch(error => {
-            console.error('Error during post-clear rescan:', error);
-          });
-        }
-
         return {
           status: 'ok',
-          message: `Cleared ${deletedCount} files`,
-          deletedCount,
-          rescanTriggered: !!this.triggerScanCallback
+          message: `Cleared ${deletedCount} files. To rescan, call meta-core's /api/scan/trigger endpoint.`,
+          deletedCount
         };
       } catch (error: any) {
         console.error('Error clearing metadata:', error);
@@ -1964,7 +1913,6 @@ export class UnifiedAPIServer {
       if (this.unifiedStateManager) {
         console.log(`  - Unified Processing API (4 states): http://${this.config.host}:${this.config.port}/api/processing/status`);
       }
-      console.log(`  - Scan API: http://${this.config.host}:${this.config.port}/api/scan/trigger (POST)`);
     } catch (error) {
       console.error('Error starting Unified API Server:', error);
       throw error;

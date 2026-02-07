@@ -98,24 +98,8 @@ export class EventSubscriber {
     console.log('[EventSubscriber] Stopped');
   }
 
-  /**
-   * Trigger a manual scan on meta-core
-   */
-  async triggerScan(): Promise<void> {
-    try {
-      const response = await fetch(`${this.options.metaCoreUrl}/api/scan/trigger`, {
-        method: 'POST'
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      console.log('[EventSubscriber] Scan triggered on meta-core');
-    } catch (error) {
-      console.error('[EventSubscriber] Failed to trigger scan:', error);
-    }
-  }
+  // NOTE: triggerScan() has been removed - meta-core handles scanning automatically
+  // To trigger a scan manually, call meta-core's /api/scan/trigger endpoint directly
 
   /**
    * Get watcher status from meta-core
@@ -171,13 +155,7 @@ export class EventSubscriber {
       this.eventSource.onopen = () => {
         console.log('[EventSubscriber] Connected to meta-core SSE');
         this.reconnectAttempts = 0;
-
-        // Request initial scan if configured
-        if (this.options.requestInitialScan) {
-          this.triggerScan().catch(err => {
-            console.error('[EventSubscriber] Failed to trigger initial scan:', err);
-          });
-        }
+        // NOTE: Initial scan is handled automatically by meta-core (Architecture V3)
       };
 
       this.eventSource.onerror = (error) => {

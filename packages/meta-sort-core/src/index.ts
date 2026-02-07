@@ -79,22 +79,8 @@ const getDuplicateResult = () => fileProcessor.getDuplicateResult();
 // API Server will be initialized after KV is ready (deferred to async init)
 let apiServer: UnifiedAPIServer | null = null;
 
-// Manual scan trigger (called from API) - delegates to meta-core via EventSubscriber
-const triggerScan = async () => {
-    console.log('[Scan] Triggering manual scan...');
-
-    // Reset pipeline counters and state before fresh scan
-    // Also publishes reset event to meta-fuse
-    await pipeline.reset();
-
-    // Trigger scan on meta-core (which will send events back via SSE)
-    if (eventSubscriber) {
-        await eventSubscriber.triggerScan();
-        console.log('[Scan] Scan triggered on meta-core');
-    } else {
-        console.warn('[Scan] EventSubscriber not available, cannot trigger scan');
-    }
-};
+// NOTE: Scan trigger has been moved to meta-core (Architecture V3)
+// Use meta-core's /api/scan/trigger endpoint directly
 
 // Global error handlers - prevent crashes from unforeseen errors
 process.on('uncaughtException', (error: Error) => {
@@ -178,7 +164,7 @@ process.on('SIGINT', async () => {
             port: config.FUSE_API_PORT,
             host: config.FUSE_API_HOST,
             enableCors: true,
-        }, unifiedStateManager, getDuplicateResult, kvClient || undefined, triggerScan, backgroundQueueConcurrency, fastQueueConcurrency, () => fileProcessor.getQueueStatus(), kvManager || undefined, getPluginManagerInstance, () => fileProcessor.getTaskScheduler());
+        }, unifiedStateManager, getDuplicateResult, kvClient || undefined, backgroundQueueConcurrency, fastQueueConcurrency, () => fileProcessor.getQueueStatus(), kvManager || undefined, getPluginManagerInstance, () => fileProcessor.getTaskScheduler());
 
         await apiServer.start();
         console.log('Unified API Server started successfully');
@@ -269,7 +255,7 @@ process.on('SIGINT', async () => {
             console.error('[Startup] Make sure meta-core is running and kv-leader.info exists.');
             process.exit(1);
         }
-        const metaCoreUrl = leaderInfo.baseUrl;
+        const metaCoreUrl = leaderInfo.apiUrl;
         console.log(`[Startup] Connecting to meta-core at ${metaCoreUrl}...`);
         eventSubscriber = new EventSubscriber({
             metaCoreUrl: metaCoreUrl,

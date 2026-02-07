@@ -270,7 +270,6 @@ describe('UnifiedAPIServer', function() {
             mockStateManager as any,
             () => duplicateResult,
             mockKV as any,
-            async () => { /* scan trigger */ },
             4, // backgroundQueueConcurrency
             16, // fastQueueConcurrency
             () => ({ fast: { pending: 0, running: 0 }, background: { pending: 0, running: 0 } })
@@ -463,20 +462,8 @@ describe('UnifiedAPIServer', function() {
         });
     });
 
-    // =========================================================================
-    // Scan API
-    // =========================================================================
-
-    describe('Scan API (/api/scan)', function() {
-        it('POST /api/scan/trigger triggers a scan', async function() {
-            const response = await app.inject({
-                method: 'POST',
-                url: '/api/scan/trigger'
-            });
-
-            expect([200, 202, 204]).to.include(response.statusCode);
-        });
-    });
+    // NOTE: /api/scan/trigger has been removed from meta-sort (Architecture V3)
+    // Scan is now handled by meta-core. Tests for scan trigger are in core.bats.
 
     // =========================================================================
     // FUSE API (Virtual Filesystem)
