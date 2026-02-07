@@ -2,7 +2,6 @@ import {dirname, join, parse} from 'path';
 import {config} from "../config/EnvConfig.js";
 import {FileProcessorInterface} from "@metazla/meta-hash";
 import {MetaDataToFolderStruct} from "./MetaDataToFolderStruct.js";
-import {DuplicateFinder, DuplicateResult} from "./DuplicateFinder.js";
 import {FileType} from "@metazla/filename-tools";
 import {FileAnalyzerInterface} from "./fileProcessor/FileAnalyzerInterface.js";
 import {FileProcessorPiscina} from "./fileProcessor/FileProcessorPiscina.js";
@@ -33,8 +32,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     virtualFileSystem: VirtualFileSystem;
     unifiedStateManager = new UnifiedProcessingStateManager();
     fileProcessor:FileAnalyzerInterface = new FileProcessorPiscina();
-    duplicateFinder = new DuplicateFinder();
-    duplicateResult: DuplicateResult | null = null;
     fileType = new FileType();
     supported = ['video','subtitle','torrent'];
 
@@ -75,10 +72,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
 
     getUnifiedStateManager(): UnifiedProcessingStateManager {
         return this.unifiedStateManager;
-    }
-
-    getDuplicateResult(): DuplicateResult | null {
-        return this.duplicateResult;
     }
 
     /**
@@ -415,20 +408,10 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 console.log(`No files to process`);
                 return;
             }
+
+            // NOTE: Duplicate detection has been moved to meta-dup service
+
             let startTime = performance.now();
-            const newDuplicateResult = await this.duplicateFinder.findDuplicates(this.fileProcessor.getDatabase());//find duplicates and removes them to avoid conflict
-            const duplicateTime = Math.ceil(performance.now() - startTime);
-            const totalDuplicates = newDuplicateResult.hashDuplicates.length + newDuplicateResult.titleDuplicates.length;
-            console.log(`Duplicate find took ${duplicateTime}ms - found ${newDuplicateResult.hashDuplicates.length} hash groups, ${newDuplicateResult.titleDuplicates.length} title groups`);
-
-            // Only update duplicateResult if we found new duplicates, or if it's the first run
-            if (totalDuplicates > 0 || this.duplicateResult === null) {
-                this.duplicateResult = newDuplicateResult;
-            }
-
-            performanceMetrics.recordDuplicateDetection(duplicateTime, totalDuplicates);
-
-            startTime = performance.now();
             console.log(`Generating virtual structure for ${this.fileProcessor.getDatabase().size} files`);
             const virtualStructure = this.metaDataToFolderStruct.generateVirtualStructure(this.fileProcessor.getDatabase());
             const virtualStructureTime = Math.ceil(performance.now() - startTime);

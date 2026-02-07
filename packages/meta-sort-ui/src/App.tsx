@@ -2,10 +2,10 @@ import { Routes, Route } from 'react-router-dom';
 import Welcome from './pages/Welcome';
 import Monitor from './pages/Monitor';
 import Plugins from './pages/Plugins';
-import Duplicates from './pages/Duplicates';
 import ServiceNav from './components/ServiceNav';
 
 // NOTE: Mounts page has been moved to meta-core dashboard
+// NOTE: Duplicates page has been moved to meta-dup service (port 8183)
 
 function App() {
   return (
@@ -15,7 +15,6 @@ function App() {
         <Routes>
           <Route path="/" element={<Welcome />} />
           <Route path="/monitor" element={<Monitor />} />
-          <Route path="/duplicates" element={<Duplicates />} />
           <Route path="/plugins" element={<Plugins />} />
         </Routes>
       </main>

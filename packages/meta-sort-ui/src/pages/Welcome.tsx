@@ -22,17 +22,6 @@ function Welcome() {
             <p>Real-time processing dashboard</p>
           </Link>
 
-          <Link to="/duplicates" className="link-card">
-            <div className="link-icon">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="8" y="2" width="13" height="18" rx="2" ry="2"/>
-                <rect x="3" y="4" width="13" height="18" rx="2" ry="2"/>
-              </svg>
-            </div>
-            <h3>Duplicates</h3>
-            <p>Find duplicate files</p>
-          </Link>
-
           <Link to="/plugins" className="link-card">
             <div className="link-icon">
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -44,6 +33,17 @@ function Welcome() {
             <h3>Plugins</h3>
             <p>Manage metadata plugins</p>
           </Link>
+
+          <a href="/editor/" className="link-card">
+            <div className="link-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </div>
+            <h3>Editor</h3>
+            <p>Edit file metadata</p>
+          </a>
         </div>
       </div>
 

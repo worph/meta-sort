@@ -153,24 +153,7 @@ export interface Metrics {
     pluginProcessingTimes?: Record<string, PluginTimingStats>;
 }
 
-export interface DuplicateGroup {
-    key: string;
-    files: string[];
-}
-
-export interface DuplicateData {
-    hashDuplicates: DuplicateGroup[];
-    titleDuplicates: DuplicateGroup[];
-    stats: {
-        hashGroupCount: number;
-        hashFileCount: number;
-        titleGroupCount: number;
-        titleFileCount: number;
-    };
-    computedAt: number;
-    computationTimeMs: number;
-    status?: string;
-}
+// NOTE: DuplicateGroup and DuplicateData types have been moved to meta-dup service
 
 export interface RedisStats {
     fileCount: number;

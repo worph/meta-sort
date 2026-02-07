@@ -74,7 +74,6 @@ fileProcessor.setPipeline(pipeline);
 // VFS and state manager are available immediately
 const vfs = fileProcessor.getVirtualFileSystem();
 const unifiedStateManager = fileProcessor.getUnifiedStateManager();
-const getDuplicateResult = () => fileProcessor.getDuplicateResult();
 
 // API Server will be initialized after KV is ready (deferred to async init)
 let apiServer: UnifiedAPIServer | null = null;
@@ -164,7 +163,7 @@ process.on('SIGINT', async () => {
             port: config.FUSE_API_PORT,
             host: config.FUSE_API_HOST,
             enableCors: true,
-        }, unifiedStateManager, getDuplicateResult, kvClient || undefined, backgroundQueueConcurrency, fastQueueConcurrency, () => fileProcessor.getQueueStatus(), kvManager || undefined, getPluginManagerInstance, () => fileProcessor.getTaskScheduler());
+        }, unifiedStateManager, kvClient || undefined, backgroundQueueConcurrency, fastQueueConcurrency, () => fileProcessor.getQueueStatus(), kvManager || undefined, getPluginManagerInstance, () => fileProcessor.getTaskScheduler());
 
         await apiServer.start();
         console.log('Unified API Server started successfully');

@@ -10,7 +10,6 @@ import fastifyCors from '@fastify/cors';
 import { VirtualFileSystem } from './VirtualFileSystem.js';
 import { performanceMetrics } from '../metrics/PerformanceMetrics.js';
 import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateManager.js';
-import { DuplicateResult } from '../logic/DuplicateFinder.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import type { KVManager } from '../kv/KVManager.js';
 import type { ExtendedProcessingSnapshot, IKVClientWithPubSub } from '../types/ExtendedInterfaces.js';
@@ -35,7 +34,6 @@ export class UnifiedAPIServer {
   private app: FastifyInstance;
   private vfs: VirtualFileSystem;
   private unifiedStateManager: UnifiedProcessingStateManager | null = null;
-  private getDuplicateResult: (() => DuplicateResult | null) | null = null;
   private kvClient: IKVClient | null = null;
   private kvManager: KVManager | null = null;
   private getQueueStatus: (() => any) | null = null;
@@ -56,7 +54,6 @@ export class UnifiedAPIServer {
     vfs: VirtualFileSystem,
     config: UnifiedAPIServerConfig = {},
     unifiedStateManager?: UnifiedProcessingStateManager,
-    getDuplicateResult?: () => DuplicateResult | null,
     kvClient?: IKVClient,
     backgroundQueueConcurrency?: number,
     fastQueueConcurrency?: number,
@@ -67,7 +64,6 @@ export class UnifiedAPIServer {
   ) {
     this.vfs = vfs;
     this.unifiedStateManager = unifiedStateManager || null;
-    this.getDuplicateResult = getDuplicateResult || null;
     this.kvClient = kvClient || null;
     this.kvManager = kvManager || null;
     this.getQueueStatus = getQueueStatus || null;
@@ -161,7 +157,6 @@ export class UnifiedAPIServer {
         services: {
           fuse: 'ok',
           metrics: 'ok',
-          duplicates: 'ok',
           unifiedProcessing: this.unifiedStateManager ? 'ok' : 'unavailable'
         }
       };
@@ -187,8 +182,7 @@ export class UnifiedAPIServer {
     // Metrics API routes (under /api/metrics)
     this.setupMetricsRoutes();
 
-    // Duplicates API routes (under /api/duplicates)
-    this.setupDuplicatesRoutes();
+    // NOTE: Duplicates API has been moved to meta-dup service (port 8183)
 
     // NOTE: Metadata API routes (/api/metadata/*) and KV Browser routes (/api/kv/*)
     // have been moved to meta-core Go API. The editor UI now uses meta-core's endpoints.
@@ -492,59 +486,8 @@ export class UnifiedAPIServer {
     });
   }
 
-  /**
-   * Setup Duplicates API routes
-   */
-  private setupDuplicatesRoutes(): void {
-    // Get duplicate files (from stored duplicate data)
-    this.app.get('/api/duplicates', async (request, reply) => {
-      try {
-        // Get stored duplicate result from WatchedFileProcessor
-        const duplicateResult = this.getDuplicateResult ? this.getDuplicateResult() : null;
-
-        if (!duplicateResult) {
-          // No duplicates found yet (processing hasn't completed)
-          return {
-            hashDuplicates: [],
-            titleDuplicates: [],
-            stats: {
-              hashGroupCount: 0,
-              hashFileCount: 0,
-              titleGroupCount: 0,
-              titleFileCount: 0
-            }
-          };
-        }
-
-        return {
-          hashDuplicates: duplicateResult.hashDuplicates,
-          titleDuplicates: duplicateResult.titleDuplicates,
-          stats: {
-            hashGroupCount: duplicateResult.hashDuplicates.length,
-            hashFileCount: duplicateResult.hashDuplicates.reduce((sum, g) => sum + g.files.length, 0),
-            titleGroupCount: duplicateResult.titleDuplicates.length,
-            titleFileCount: duplicateResult.titleDuplicates.reduce((sum, g) => sum + g.files.length, 0)
-          }
-        };
-      } catch (error) {
-        console.error('Error retrieving duplicates:', error);
-        return reply.status(500).send({
-          error: 'Failed to retrieve duplicates',
-          details: (error as Error).message
-        });
-      }
-    });
-
-    // Refresh duplicates (trigger re-computation)
-    this.app.post('/api/duplicates/refresh', async (request, reply) => {
-      // Currently just acknowledges the request
-      // The duplicate detection runs automatically during processing
-      return {
-        status: 'ok',
-        message: 'Duplicate refresh triggered'
-      };
-    });
-  }
+  // NOTE: Duplicates API has been moved to meta-dup service (port 8183)
+  // Use http://localhost:8183/api/duplicates for duplicate detection
 
   // NOTE: setupMetadataRoutes() and setupKVBrowserRoutes() have been removed.
   // The metadata editor API (/api/metadata/*) and KV browser API (/api/kv/*)
@@ -1905,7 +1848,6 @@ export class UnifiedAPIServer {
       console.log(`Unified API Server listening on http://${this.config.host}:${this.config.port}`);
       console.log(`  - FUSE API: http://${this.config.host}:${this.config.port}/api/fuse/*`);
       console.log(`  - Metrics API: http://${this.config.host}:${this.config.port}/api/metrics`);
-      console.log(`  - Duplicates API: http://${this.config.host}:${this.config.port}/api/duplicates`);
       if (this.kvClient) {
         console.log(`  - Metadata API: http://${this.config.host}:${this.config.port}/api/metadata/* (GET/PUT/DELETE/POST)`);
         console.log(`  - KV Browser API: http://${this.config.host}:${this.config.port}/api/kv/* (GET)`);

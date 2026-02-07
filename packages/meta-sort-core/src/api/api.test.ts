@@ -9,7 +9,6 @@ import { expect } from 'chai';
 import { UnifiedAPIServer } from './UnifiedAPIServer.js';
 import { VirtualFileSystem } from './VirtualFileSystem.js';
 import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateManager.js';
-import { DuplicateResult } from '../logic/DuplicateFinder.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -205,25 +204,7 @@ class MockProcessingStateManager {
     }
 }
 
-/**
- * Mock Duplicate Result Provider
- */
-function createMockDuplicateResult(): DuplicateResult {
-    return {
-        hashDuplicates: [
-            {
-                key: 'abc123',
-                files: ['/files/movie1.mp4', '/files/movie1-copy.mp4']
-            }
-        ],
-        titleDuplicates: [
-            {
-                key: 'Movie Title',
-                files: ['/files/movie1.mp4', '/files/movie2.mp4']
-            }
-        ]
-    };
-}
+// NOTE: Duplicates API has been moved to meta-dup service (port 8183)
 
 // =============================================================================
 // Test Suite
@@ -234,7 +215,6 @@ describe('UnifiedAPIServer', function() {
     let app: FastifyInstance;
     let mockKV: MockKVClient;
     let mockStateManager: MockProcessingStateManager;
-    let duplicateResult = createMockDuplicateResult();
 
     before(async function() {
         // Create mocks
@@ -268,7 +248,6 @@ describe('UnifiedAPIServer', function() {
             vfs,
             { port: 3000, host: 'localhost', enableCors: true },
             mockStateManager as any,
-            () => duplicateResult,
             mockKV as any,
             4, // backgroundQueueConcurrency
             16, // fastQueueConcurrency
@@ -396,36 +375,8 @@ describe('UnifiedAPIServer', function() {
         });
     });
 
-    // =========================================================================
-    // Duplicates API (Duplicates Page)
-    // =========================================================================
-
-    describe('Duplicates API (/api/duplicates)', function() {
-        it('GET /api/duplicates returns duplicate analysis', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/duplicates'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('hashDuplicates');
-            expect(body).to.have.property('titleDuplicates');
-            expect(Array.isArray(body.hashDuplicates)).to.be.true;
-            expect(Array.isArray(body.titleDuplicates)).to.be.true;
-        });
-
-        it('POST /api/duplicates/refresh acknowledges request', async function() {
-            const response = await app.inject({
-                method: 'POST',
-                url: '/api/duplicates/refresh'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('status');
-        });
-    });
+    // NOTE: Duplicates API has been moved to meta-dup service (port 8183)
+    // See dev/test/suites/meta-dup.bats for duplicate detection tests
 
     // =========================================================================
     // Stats API (Dashboard)
