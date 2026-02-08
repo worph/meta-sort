@@ -19,12 +19,8 @@ import type {
 } from './types.js';
 import type { TaskQueueType } from '../plugin-engine/types.js';
 import type { IKVClient } from '../kv/IKVClient.js';
-import { hasStreamSupport, type ExtendedContainerTask } from '../types/ExtendedInterfaces.js';
+import { type ExtendedContainerTask } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
-
-// Redis Streams for reliable event delivery
-const EVENTS_STREAM = 'meta-sort:events';
-const STREAM_MAXLEN = 10000;
 
 /**
  * Scheduler events
@@ -193,6 +189,7 @@ export class ContainerPluginScheduler extends EventEmitter {
 
     /**
      * Mark a plugin as completed for a file and notify waiters
+     * Note: Event publishing to meta-fuse is handled by meta-core (file:events stream)
      */
     private markPluginCompleted(fileHash: string, pluginId: string, filePath?: string): void {
         // Track completion
@@ -209,37 +206,6 @@ export class ContainerPluginScheduler extends EventEmitter {
                 resolve();
             }
             this.dependencyWaiters.delete(key);
-        }
-
-        // Publish to Redis for external subscribers (e.g., meta-stremio)
-        this.publishPluginComplete(fileHash, pluginId, filePath || '');
-    }
-
-    /**
-     * Publish plugin completion event to Redis Streams
-     *
-     * External services (like meta-fuse, meta-stremio) consume this stream
-     * to be notified when specific plugins complete for a file.
-     */
-    private async publishPluginComplete(fileHash: string, pluginId: string, filePath: string): Promise<void> {
-        if (!this.kvClient || !hasStreamSupport(this.kvClient)) {
-            return;
-        }
-
-        try {
-            const payload = JSON.stringify({
-                fileHash,
-                pluginId,
-                filePath,
-                timestamp: Date.now()
-            });
-            await this.kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
-                type: 'plugin:complete',
-                payload,
-                timestamp: Date.now().toString()
-            });
-        } catch (error) {
-            // Silent fail - stream publish is optional
         }
     }
 

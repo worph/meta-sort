@@ -13,6 +13,7 @@
  */
 
 import * as IORedis from 'ioredis';
+import * as os from 'os';
 import type { IKVClient, KeyValuePair } from './IKVClient.js';
 import {
     flattenMetadata,
@@ -24,6 +25,25 @@ import {
 // ESM/CJS interop for ioredis
 const Redis = (IORedis as any).default ?? IORedis;
 type RedisInstance = InstanceType<typeof Redis>;
+
+/**
+ * Stream message from Redis Streams
+ * File events from meta-core: add, change, delete, rename
+ */
+export interface StreamMessage {
+    id: string;
+    type: 'add' | 'change' | 'delete' | 'rename';
+    path: string;
+    size?: string;
+    partialHash?: string;
+    oldPath?: string;
+    timestamp: string;
+}
+
+/**
+ * Stream consumer callback
+ */
+export type StreamMessageHandler = (message: StreamMessage) => Promise<void>;
 
 interface RedisClientConfig {
     url: string;
@@ -37,9 +57,17 @@ export class RedisKVClient implements IKVClient {
     private prefix: string;
     private isConnected: boolean = false;
 
+    // Stream consumer state
+    private streamConsumerRunning = false;
+    private streamConsumerAbort: AbortController | null = null;
+    private consumerName: string;
+
     constructor(config: RedisClientConfig) {
         this.timeout = config.timeout || 30000;
         this.prefix = config.prefix || '';
+
+        // Unique consumer name for this instance
+        this.consumerName = `${os.hostname()}-${process.pid}`;
 
         // Parse Redis URL and create client
         this.redis = new Redis(config.url, {
@@ -372,10 +400,225 @@ export class RedisKVClient implements IKVClient {
     }
 
     // ========================================================================
+    // Redis Streams Consumer Methods
+    // ========================================================================
+
+    /**
+     * Initialize stream consumer group
+     * Creates the consumer group at position 0 to read all historical events
+     *
+     * @param stream - Stream name (e.g., 'file:events')
+     * @param group - Consumer group name (e.g., 'meta-sort-processor')
+     */
+    async initStreamConsumer(stream: string, group: string): Promise<void> {
+        try {
+            // Create consumer group at position 0 (read all historical events)
+            // MKSTREAM creates the stream if it doesn't exist
+            await this.redis.xgroup('CREATE', stream, group, '0', 'MKSTREAM');
+            console.log(`[Redis] Created consumer group '${group}' for stream '${stream}'`);
+        } catch (error: any) {
+            // BUSYGROUP means group already exists - that's fine
+            if (error.message?.includes('BUSYGROUP')) {
+                console.log(`[Redis] Consumer group '${group}' already exists`);
+            } else {
+                throw error;
+            }
+        }
+    }
+
+    /**
+     * Process pending entries from crashed consumers
+     * Uses XAUTOCLAIM to claim entries that have been idle too long
+     *
+     * @param stream - Stream name
+     * @param group - Consumer group name
+     * @param minIdleTime - Minimum idle time in ms before claiming (default: 30000)
+     * @param onMessage - Handler for each message
+     */
+    async processPendingEntries(
+        stream: string,
+        group: string,
+        minIdleTime: number = 30000,
+        onMessage: StreamMessageHandler
+    ): Promise<number> {
+        let processed = 0;
+        let cursor = '0-0';
+
+        try {
+            while (true) {
+                // XAUTOCLAIM claims idle entries and returns them
+                const result = await this.redis.xautoclaim(
+                    stream,
+                    group,
+                    this.consumerName,
+                    minIdleTime,
+                    cursor,
+                    'COUNT',
+                    100
+                ) as [string, Array<[string, string[]]>, string[]];
+
+                const [nextCursor, entries] = result;
+                cursor = nextCursor;
+
+                if (!entries || entries.length === 0) {
+                    break;
+                }
+
+                for (const [id, fields] of entries) {
+                    try {
+                        const message = this.parseStreamEntry(id, fields);
+                        if (message) {
+                            await onMessage(message);
+                            // ACK the message after successful processing
+                            await this.redis.xack(stream, group, id);
+                            processed++;
+                        }
+                    } catch (error: any) {
+                        console.error(`[Redis] Error processing pending entry ${id}:`, error.message);
+                    }
+                }
+
+                // If cursor is 0-0, we've processed all pending entries
+                if (cursor === '0-0') {
+                    break;
+                }
+            }
+
+            if (processed > 0) {
+                console.log(`[Redis] Processed ${processed} pending stream entries`);
+            }
+        } catch (error: any) {
+            console.error('[Redis] Error processing pending entries:', error.message);
+        }
+
+        return processed;
+    }
+
+    /**
+     * Start stream consumer loop
+     * Reads messages using XREADGROUP and calls the handler
+     *
+     * @param stream - Stream name
+     * @param group - Consumer group name
+     * @param onMessage - Handler for each message
+     * @param blockMs - Block timeout in ms (default: 5000)
+     */
+    async startStreamConsumer(
+        stream: string,
+        group: string,
+        onMessage: StreamMessageHandler,
+        blockMs: number = 5000
+    ): Promise<void> {
+        if (this.streamConsumerRunning) {
+            console.warn('[Redis] Stream consumer already running');
+            return;
+        }
+
+        this.streamConsumerRunning = true;
+        this.streamConsumerAbort = new AbortController();
+
+        console.log(`[Redis] Starting stream consumer: ${stream} (group: ${group}, consumer: ${this.consumerName})`);
+
+        // Consumer loop
+        while (this.streamConsumerRunning && !this.streamConsumerAbort.signal.aborted) {
+            try {
+                // XREADGROUP blocks waiting for new messages
+                // '>' means only read new messages (not already delivered to this consumer)
+                const result = await (this.redis.call(
+                    'XREADGROUP',
+                    'GROUP', group,
+                    this.consumerName,
+                    'BLOCK', blockMs,
+                    'COUNT', 10,
+                    'STREAMS', stream,
+                    '>'
+                ) as Promise<Array<[string, Array<[string, string[]]>]> | null>);
+
+                if (!result || result.length === 0) {
+                    continue; // Timeout, loop again
+                }
+
+                // Process each stream's messages
+                for (const [streamName, entries] of result) {
+                    for (const [id, fields] of entries) {
+                        try {
+                            const message = this.parseStreamEntry(id, fields);
+                            if (message) {
+                                await onMessage(message);
+                                // ACK the message after successful processing
+                                await this.redis.xack(stream, group, id);
+                            }
+                        } catch (error: any) {
+                            console.error(`[Redis] Error processing stream entry ${id}:`, error.message);
+                            // Don't ACK on error - message will be reprocessed
+                        }
+                    }
+                }
+            } catch (error: any) {
+                if (this.streamConsumerAbort?.signal.aborted) {
+                    break;
+                }
+                console.error('[Redis] Stream consumer error:', error.message);
+                // Brief pause before retrying
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+
+        console.log('[Redis] Stream consumer stopped');
+    }
+
+    /**
+     * Stop the stream consumer loop
+     */
+    stopStreamConsumer(): void {
+        if (!this.streamConsumerRunning) {
+            return;
+        }
+
+        console.log('[Redis] Stopping stream consumer...');
+        this.streamConsumerRunning = false;
+        this.streamConsumerAbort?.abort();
+        this.streamConsumerAbort = null;
+    }
+
+    /**
+     * Parse a stream entry into a StreamMessage
+     */
+    private parseStreamEntry(id: string, fields: string[]): StreamMessage | null {
+        // Fields come as flat array: ['type', 'add', 'path', '...', 'timestamp', '123']
+        const fieldMap: Record<string, string> = {};
+        for (let i = 0; i < fields.length; i += 2) {
+            fieldMap[fields[i]] = fields[i + 1];
+        }
+
+        if (!fieldMap.type) {
+            console.warn(`[Redis] Invalid stream entry ${id}: missing type`);
+            return null;
+        }
+
+        if (!fieldMap.path) {
+            console.warn(`[Redis] Invalid stream entry ${id}: missing path for ${fieldMap.type} event`);
+            return null;
+        }
+
+        return {
+            id,
+            type: fieldMap.type as StreamMessage['type'],
+            path: fieldMap.path,
+            size: fieldMap.size,
+            partialHash: fieldMap.partialHash,
+            oldPath: fieldMap.oldPath,
+            timestamp: fieldMap.timestamp || '0',
+        };
+    }
+
+    // ========================================================================
     // Lifecycle
     // ========================================================================
 
     async close(): Promise<void> {
+        // Stop stream consumer first
+        this.stopStreamConsumer();
         await this.redis.quit();
         this.isConnected = false;
     }

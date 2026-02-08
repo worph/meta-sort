@@ -2,22 +2,6 @@ import * as path from 'path';
 import PQueue from 'p-queue';
 import {PipelineConfig} from './PipelineConfig.js';
 import {performanceMetrics} from '../../metrics/PerformanceMetrics.js';
-import { hasStreamSupport } from '../../types/ExtendedInterfaces.js';
-
-// Redis Streams for reliable event delivery to meta-fuse
-// Single stream with type field for all event types (batch, reset, plugin:complete)
-const EVENTS_STREAM = 'meta-sort:events';
-
-// Maximum stream length (approximate, ~10000 entries provides hours of history)
-const STREAM_MAXLEN = 10000;
-
-// Batch update interval (5 seconds)
-const BATCH_INTERVAL_MS = 5000;
-
-interface BatchChange {
-    action: 'add' | 'update' | 'remove';
-    hashId: string;
-}
 
 /**
  * Streaming Pipeline for file processing
@@ -26,7 +10,7 @@ interface BatchChange {
  *
  * With midhash256 being instant (< 1s), files appear in VFS immediately
  *
- * Publishes batched updates to meta-fuse via Redis Streams every 5 seconds.
+ * Note: Event publishing to meta-fuse is handled by meta-core (file:events stream)
  */
 export class StreamingPipeline {
     private validationQueue: PQueue;
@@ -38,10 +22,6 @@ export class StreamingPipeline {
     private validatedCount = 0;
     private fastProcessedCount = 0;
     private backgroundProcessedCount = 0;
-
-    // Batch buffer for stream notifications
-    private batchBuffer: BatchChange[] = [];
-    private batchTimer: NodeJS.Timeout | null = null;
 
     constructor(config: PipelineConfig) {
         this.config = config;
@@ -65,72 +45,6 @@ export class StreamingPipeline {
         });
 
         console.log(`[Pipeline] Initialized with concurrency: validation=${config.validationConcurrency}, fastQueue=${config.fastQueueConcurrency}, backgroundQueue=${config.backgroundQueueConcurrency}`);
-
-        // Start batch publish timer
-        this.startBatchTimer();
-    }
-
-    /**
-     * Start the batch publish timer
-     * Publishes accumulated changes to meta-fuse every 5 seconds
-     */
-    private startBatchTimer(): void {
-        this.batchTimer = setInterval(() => {
-            this.flushBatch().catch(err => {
-                console.error('[Pipeline] Failed to flush batch:', err.message);
-            });
-        }, BATCH_INTERVAL_MS);
-    }
-
-    /**
-     * Stop the batch publish timer
-     */
-    stopBatchTimer(): void {
-        if (this.batchTimer) {
-            clearInterval(this.batchTimer);
-            this.batchTimer = null;
-        }
-    }
-
-    /**
-     * Queue a change for batched notification
-     */
-    private queueChange(action: 'add' | 'update' | 'remove', hashId: string): void {
-        // Deduplicate: remove existing entries for same hashId
-        this.batchBuffer = this.batchBuffer.filter(c => c.hashId !== hashId);
-        this.batchBuffer.push({ action, hashId });
-    }
-
-    /**
-     * Flush the batch buffer and publish to Redis Streams
-     */
-    private async flushBatch(): Promise<void> {
-        if (this.batchBuffer.length === 0) {
-            return;
-        }
-
-        const changes = [...this.batchBuffer];
-        this.batchBuffer = [];
-
-        try {
-            const kvClient = this.config.kvClient;
-            if (kvClient && hasStreamSupport(kvClient)) {
-                const payload = JSON.stringify({
-                    timestamp: Date.now(),
-                    changes
-                });
-                await kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
-                    type: 'batch',
-                    payload,
-                    timestamp: Date.now().toString()
-                });
-                console.log(`[Pipeline] Published batch update to stream: ${changes.length} changes`);
-            }
-        } catch (error: any) {
-            // Put changes back in buffer on failure
-            this.batchBuffer = [...changes, ...this.batchBuffer];
-            console.warn(`[Pipeline] Failed to publish batch: ${error.message}`);
-        }
     }
 
     /**
@@ -232,11 +146,6 @@ export class StreamingPipeline {
                 if (virtualPath) {
                     // Add to VFS immediately (file appears with permanent midhash256 ID)
                     this.config.virtualFileSystem.addFile(virtualPath, filePath, metadata);
-
-                    // Queue for pub/sub notification to meta-fuse
-                    if (metadata.cid_midhash256) {
-                        this.queueChange('add', metadata.cid_midhash256);
-                    }
 
                     // Notify Stremio addon to add video (incremental update like FUSE)
                     if (metadata.cid_midhash256) {
@@ -346,20 +255,12 @@ export class StreamingPipeline {
      * Handle file deleted event (from chokidar)
      */
     async handleFileDeleted(filePath: string): Promise<void> {
-        // Get hashId before removal for pub/sub notification
-        const metadata = this.config.fileProcessor.getDatabase().get(filePath);
-        const hashId = (metadata as any)?.cid_midhash256;
-
         // Remove from state and call cleanup
         if (this.config.fileProcessor.deleteFile) {
             this.config.fileProcessor.deleteFile(filePath);
         }
         this.config.stateManager.removeFile(filePath);
-
-        // Queue for pub/sub notification to meta-fuse
-        if (hashId) {
-            this.queueChange('remove', hashId);
-        }
+        // Note: meta-core handles event publishing to meta-fuse via file:events stream
     }
 
     /**
@@ -412,7 +313,7 @@ export class StreamingPipeline {
     /**
      * Reset pipeline counters and clear state manager
      * Called when triggering a fresh scan to reset statistics
-     * Publishes reset event to notify meta-fuse to clear its VFS
+     * Note: meta-fuse listens to file:events stream from meta-core for updates
      */
     async reset(): Promise<void> {
         console.log('[Pipeline] Resetting counters and state...');
@@ -423,29 +324,8 @@ export class StreamingPipeline {
         this.fastProcessedCount = 0;
         this.backgroundProcessedCount = 0;
 
-        // Clear batch buffer
-        this.batchBuffer = [];
-
         // Clear state manager (discovered, processing, done states)
         this.config.stateManager.clear();
-
-        // Publish reset event to Redis Streams to notify meta-fuse
-        if (this.config.kvClient && hasStreamSupport(this.config.kvClient)) {
-            try {
-                const payload = JSON.stringify({
-                    timestamp: Date.now(),
-                    action: 'reset'
-                });
-                await this.config.kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
-                    type: 'reset',
-                    payload,
-                    timestamp: Date.now().toString()
-                });
-                console.log('[Pipeline] Reset event published to stream');
-            } catch (error) {
-                console.error('[Pipeline] Failed to publish reset event:', error);
-            }
-        }
 
         console.log('[Pipeline] Reset complete');
     }

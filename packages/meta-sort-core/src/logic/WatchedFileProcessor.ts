@@ -12,12 +12,8 @@ import {VirtualFileSystem} from "../api/VirtualFileSystem.js";
 import {performanceMetrics} from "../metrics/PerformanceMetrics.js";
 import {UnifiedProcessingStateManager} from "./UnifiedProcessingStateManager.js";
 import type {IKVClient} from "../kv/IKVClient.js";
-import { hasStreamSupport, type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
+import { type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
 import * as webdav from '../webdav/WebdavClient.js';
-
-// Redis Streams for reliable event delivery
-const EVENTS_STREAM = 'meta-sort:events';
-const STREAM_MAXLEN = 10000;
 import PQueue from "p-queue";
 import os from 'os';
 import { TaskScheduler, createTaskScheduler, MetadataNodeKVStore } from "../plugin-engine/index.js";
@@ -205,7 +201,8 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     }
 
     /**
-     * Set up TaskScheduler event listeners for VFS integration and Redis pub/sub
+     * Set up TaskScheduler event listeners for VFS integration
+     * Note: Event publishing to meta-fuse is handled by meta-core (file:events stream)
      */
     private setupTaskSchedulerEvents(): void {
         if (!this.taskScheduler) return;
@@ -218,9 +215,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
             if (task.pluginId === 'filename-parser') {
                 this.updateVFSForFile(task.fileHash, task.filePath);
             }
-
-            // Publish plugin completion event to Redis
-            this.publishPluginComplete(task.fileHash, task.pluginId, task.filePath);
         });
 
         // When all tasks for a file complete
@@ -236,32 +230,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 this.unifiedStateManager.completeHashProcessing(filePath, fileHash);
             }
         });
-    }
-
-    /**
-     * Publish plugin completion event to Redis Streams
-     */
-    private async publishPluginComplete(fileHash: string, pluginId: string, filePath: string): Promise<void> {
-        const kvClient = this.getKVClient();
-        if (!kvClient || !hasStreamSupport(kvClient)) {
-            return;
-        }
-
-        try {
-            const payload = JSON.stringify({
-                fileHash,
-                pluginId,
-                filePath,
-                timestamp: Date.now()
-            });
-            await kvClient.xadd(EVENTS_STREAM, STREAM_MAXLEN, {
-                type: 'plugin:complete',
-                payload,
-                timestamp: Date.now().toString()
-            });
-        } catch (error) {
-            // Silent fail - stream publish is optional
-        }
     }
 
     /**

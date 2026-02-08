@@ -11,7 +11,8 @@ import {KVManager} from "./kv/KVManager.js";
 import {getPluginManagerInstance, initializePluginManager} from "./logic/fileProcessor/FileProcessorPiscina.js";
 import {ContainerManager} from "./container-plugins/ContainerManager.js";
 import {ContainerPluginScheduler} from "./container-plugins/ContainerPluginScheduler.js";
-import {EventSubscriber} from "./events/EventSubscriber.js";
+import {FileEventConsumer} from "./events/FileEventConsumer.js";
+import {RedisKVClient} from "./kv/RedisClient.js";
 
 try {
     // Get current user information
@@ -39,8 +40,8 @@ let kvManager: KVManager | null = null;
 let containerManager: ContainerManager | null = null;
 let containerPluginScheduler: ContainerPluginScheduler | null = null;
 
-// Event Subscriber for receiving events from meta-core (Architecture V3)
-let eventSubscriber: EventSubscriber | null = null;
+// File Event Consumer for receiving events from meta-core via Redis Stream
+let fileEventConsumer: FileEventConsumer | null = null;
 
 // Calculate concurrency for pipeline stages
 const cpuCount = os.cpus().length;
@@ -102,10 +103,10 @@ process.on('SIGINT', async () => {
         await apiServer.stop();
     }
 
-    // Stop Event Subscriber if running
-    if (eventSubscriber) {
-        console.log('[Shutdown] Stopping Event Subscriber...');
-        await eventSubscriber.stop();
+    // Stop File Event Consumer if running
+    if (fileEventConsumer) {
+        console.log('[Shutdown] Stopping File Event Consumer...');
+        fileEventConsumer.stop();
     }
 
     // Stop Container Manager if running
@@ -246,24 +247,21 @@ process.on('SIGINT', async () => {
             console.log(`[Cache] midhash256 cache: ${hits} hits, ${misses} misses (${hitRate}% hit rate)`);
         }
 
-        // Connect to meta-core for file events via SSE (Architecture V3)
-        // Get meta-core URL from leader discovery
-        const leaderInfo = kvManager?.getLeaderInfo();
-        if (!leaderInfo) {
-            console.error('[Startup] ERROR: No leader info available. Cannot connect to meta-core.');
-            console.error('[Startup] Make sure meta-core is running and kv-leader.info exists.');
+        // Connect to meta-core for file events via Redis Stream
+        // KV client must be available
+        if (!kvClient) {
+            console.error('[Startup] ERROR: KV client not available. Cannot consume file events.');
+            console.error('[Startup] Make sure meta-core is running and Redis is accessible.');
             process.exit(1);
         }
-        const metaCoreUrl = leaderInfo.apiUrl;
-        console.log(`[Startup] Connecting to meta-core at ${metaCoreUrl}...`);
-        eventSubscriber = new EventSubscriber({
-            metaCoreUrl: metaCoreUrl,
+        console.log('[Startup] Starting File Event Consumer (Redis Stream)...');
+        fileEventConsumer = new FileEventConsumer({
+            kvClient: kvClient as RedisKVClient,
             pipeline: pipeline,
-            requestInitialScan: true, // Request initial scan from meta-core
-            reconnectDelayMs: 5000,
+            filesPath: config.FILES_PATH,
         });
-        await eventSubscriber.start();
-        console.log('[Startup] EventSubscriber connected to meta-core');
+        await fileEventConsumer.start();
+        console.log('[Startup] FileEventConsumer started, consuming from file:events stream');
 
     } catch (error) {
         console.error('[Startup] Error during startup:', error);
