@@ -2,7 +2,7 @@ import {Piscina} from "piscina";
 import {Input, Output} from "./worker.js";
 import {HashIndexManager} from "@metazla/meta-hash";
 import {config} from "../../config/EnvConfig.js";
-import {stat} from "fs/promises";
+import * as webdav from '../../webdav/WebdavClient.js';
 // Note: Full hashes are now computed by the full-hash container plugin
 import {HashMeta} from "@metazla/meta-interface";
 import {FileAnalyzerInterface} from "./FileAnalyzerInterface.js";
@@ -160,7 +160,10 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 this.unifiedStateManager.startLightProcessing(filePath);
             }
 
-            const stats = await stat(filePath);
+            const stats = await webdav.stat(filePath);
+            if (!stats || !stats.exists) {
+                throw new Error(`File not found via WebDAV: ${filePath}`);
+            }
 
             // STEP 1: Check cache for midhash256 FIRST (avoids network I/O on unchanged files)
             let midHash256: string | undefined;
@@ -325,44 +328,65 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
 
     /**
      * Light Processing Phase - Fast processing to make file accessible in VFS
-     * - Compute midhash256 (< 1s)
+     * - Use midhash256 from meta-core (or compute locally if not provided)
      * - Extract metadata (filename, FFmpeg analysis)
      * - Store in KV
      * - File becomes accessible in VFS with midhash256 ID
      *
+     * @param filePath - Path to the file
+     * @param current - Current file number (for progress reporting)
+     * @param queueSize - Total queue size (for progress reporting)
+     * @param providedMidHash256 - Pre-computed midhash256 from meta-core (if available)
+     *
      * @deprecated Use TaskScheduler-based processing via WatchedFileProcessor.queueFile() instead.
      * This method is kept for backward compatibility with StreamingPipeline.
      */
-    async processLightPhase(filePath: string, current: number, queueSize: number) {
+    async processLightPhase(filePath: string, current: number, queueSize: number, providedMidHash256?: string) {
         try {
             // STATE: Start LIGHT processing
             if (this.unifiedStateManager) {
                 this.unifiedStateManager.startLightProcessing(filePath);
             }
 
-            const stats = await stat(filePath);
+            const stats = await webdav.stat(filePath);
+            if (!stats || !stats.exists) {
+                throw new Error(`File not found via WebDAV: ${filePath}`);
+            }
 
-            // STEP 1: Check cache for midhash256 FIRST (avoids network I/O on unchanged files)
+            // STEP 1: Use midhash256 from meta-core if provided, otherwise check cache/compute locally
             let midHash256: string | undefined;
-            const indexLine = this.indexManager.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
 
-            if (indexLine && indexLine.cid_midhash256) {
-                // Cache hit! Use cached midhash256 (no network I/O needed)
-                midHash256 = indexLine.cid_midhash256;
+            if (providedMidHash256) {
+                // midhash256 provided by meta-core - use directly (no file I/O needed)
+                midHash256 = providedMidHash256;
                 performanceMetrics.recordCacheHit('midhash256');
-            } else {
-                // Cache miss - compute midhash256 (< 1 second, but requires network I/O on network drives)
-                const computeStart = performance.now();
-                const { computeMidHash256 } = await import('@metazla/meta-hash');
-                midHash256 = await computeMidHash256(filePath);
-                const computeTime = Math.ceil(performance.now() - computeStart);
 
-                // Record midhash256 computation time (excludes cache hits)
-                performanceMetrics.recordHashComputation('cid_midhash256', computeTime);
-                performanceMetrics.recordCacheMiss('midhash256');
-
-                // Store in cache for future lookups
+                // Store in local cache for future lookups
                 this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
+            } else {
+                // Fallback: Check cache or compute locally (legacy path)
+                const indexLine = this.indexManager.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
+
+                if (indexLine && indexLine.cid_midhash256) {
+                    // Cache hit! Use cached midhash256 (no network I/O needed)
+                    midHash256 = indexLine.cid_midhash256;
+                    performanceMetrics.recordCacheHit('midhash256');
+                } else {
+                    // Cache miss - compute midhash256 locally (requires file access)
+                    // Note: This path should not be hit in normal operation since meta-core provides midhash256
+                    console.warn(`[FileProcessor] Computing midhash256 locally for ${filePath} - meta-core should provide this`);
+                    const computeStart = performance.now();
+                    const { computeMidHash256 } = await import('@metazla/meta-hash');
+                    midHash256 = await computeMidHash256(filePath);
+                    const computeTime = Math.ceil(performance.now() - computeStart);
+
+                    // Record midhash256 computation time (excludes cache hits)
+                    performanceMetrics.recordHashComputation('cid_midhash256', computeTime);
+                    performanceMetrics.recordCacheMiss('midhash256');
+
+                    // Store in cache for future lookups
+                    this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
+                }
             }
 
             // Initialize metadata with midhash256
@@ -451,7 +475,10 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 this.unifiedStateManager.startHashProcessing(filePath);
             }
 
-            const stats = await stat(filePath);
+            const stats = await webdav.stat(filePath);
+            if (!stats || !stats.exists) {
+                throw new Error(`File not found via WebDAV: ${filePath}`);
+            }
             const metadata = this.database.get(filePath);
             if (!metadata) {
                 throw new Error('Metadata not found - light processing may have failed');

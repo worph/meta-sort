@@ -11,8 +11,12 @@ export interface FileAnalyzerInterface {
     /**
      * Light processing phase - fast metadata extraction + midhash256
      * File becomes accessible in VFS with permanent ID after this phase
+     * @param filePath - Path to the file
+     * @param current - Current file number
+     * @param queueSize - Total queue size
+     * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
-    processLightPhase(filePath: string, current: number, queueSize: number):Promise<void>;
+    processLightPhase(filePath: string, current: number, queueSize: number, midhash256?: string):Promise<void>;
 
     /**
      * Hash processing phase - background hash computation

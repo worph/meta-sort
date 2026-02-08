@@ -508,7 +508,6 @@ services:
 | `META_CORE_PATH` | `/meta-core` | Path to META_CORE_VOLUME (infrastructure) |
 | `FILES_PATH` | `/files` | Path to FILES_VOLUME (shared media) |
 | `REDIS_URL` | Auto-discover | Redis connection (from leader lock file) |
-| `WATCH_FOLDER_LIST` | `$FILES_PATH` | Comma-separated folders to watch for media |
 | `SERVICE_NAME` | Container hostname | Unique service identifier |
 | `BASE_URL` | `http://localhost:8180` | External URL for this service |
 

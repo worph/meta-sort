@@ -1,6 +1,6 @@
 import {HashIndexManager} from "@metazla/meta-hash";
 import {config} from "../../config/EnvConfig.js";
-import {stat} from "fs/promises";
+import * as webdav from '../../webdav/WebdavClient.js';
 import {targetHash} from "../../config/TargetHash.js";
 import {HashMeta} from "@metazla/meta-interface";
 import {FileAnalyzerInterface} from "./FileAnalyzerInterface.js";
@@ -50,7 +50,10 @@ export class FileProcessor implements FileAnalyzerInterface{
                 return;
             }
 
-            const stats = await stat(filePath);
+            const stats = await webdav.stat(filePath);
+            if (!stats || !stats.exists) {
+                throw new Error(`File not found via WebDAV: ${filePath}`);
+            }
             let indexLine = this.indexManager.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
             let hash: HashMeta = {};
             if(indexLine) {

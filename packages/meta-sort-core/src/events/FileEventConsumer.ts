@@ -12,8 +12,8 @@ import type { RedisKVClient, StreamMessage } from '../kv/RedisClient.js';
 
 // Pipeline interface (minimal, matching StreamingPipeline)
 interface Pipeline {
-    handleFileAdded(filePath: string): void;
-    handleFileChanged(filePath: string): void;
+    handleFileAdded(filePath: string, midhash256?: string): void;
+    handleFileChanged(filePath: string, midhash256?: string): void;
     handleFileDeleted(filePath: string): void;
 }
 
@@ -116,11 +116,11 @@ export class FileEventConsumer {
 
         switch (message.type) {
             case 'add':
-                this.pipeline.handleFileAdded(absolutePath);
+                this.pipeline.handleFileAdded(absolutePath, message.midhash256);
                 break;
 
             case 'change':
-                this.pipeline.handleFileChanged(absolutePath);
+                this.pipeline.handleFileChanged(absolutePath, message.midhash256);
                 break;
 
             case 'delete':
@@ -132,7 +132,7 @@ export class FileEventConsumer {
                 if (message.oldPath) {
                     this.pipeline.handleFileDeleted(toAbsolutePath(message.oldPath));
                 }
-                this.pipeline.handleFileAdded(absolutePath);
+                this.pipeline.handleFileAdded(absolutePath, message.midhash256);
                 break;
 
             default:

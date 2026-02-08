@@ -35,7 +35,7 @@ export interface StreamMessage {
     type: 'add' | 'change' | 'delete' | 'rename';
     path: string;
     size?: string;
-    partialHash?: string;
+    midhash256?: string;  // midhash256 CID computed by meta-core
     oldPath?: string;
     timestamp: string;
 }
@@ -606,7 +606,7 @@ export class RedisKVClient implements IKVClient {
             type: fieldMap.type as StreamMessage['type'],
             path: fieldMap.path,
             size: fieldMap.size,
-            partialHash: fieldMap.partialHash,
+            midhash256: fieldMap.midhash256,
             oldPath: fieldMap.oldPath,
             timestamp: fieldMap.timestamp || '0',
         };

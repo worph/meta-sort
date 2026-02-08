@@ -91,8 +91,10 @@ export class StreamingPipeline {
      * - Optional MIME validation (reads file header)
      * - Files already marked as discovered in start()
      * - After validation passes, file is removed from discovered (tracked by PQueue pending)
+     * @param filePath - Path to the file
+     * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
-    private async validateFile(filePath: string): Promise<void> {
+    private async validateFile(filePath: string, midhash256?: string): Promise<void> {
         try {
             // Extension check (instant, no I/O)
             const ext = path.extname(filePath).toLowerCase();
@@ -113,7 +115,8 @@ export class StreamingPipeline {
             this.config.stateManager.removeFile(filePath);
 
             // Stage 2: Fast Queue - metadata + midhash256 (fire and forget)
-            this.fastQueue.add(() => this.processLightPhase(filePath))
+            // Pass midhash256 from meta-core if available
+            this.fastQueue.add(() => this.processLightPhase(filePath, midhash256))
                 .catch(err => console.error(`[Pipeline] Fast queue error for ${filePath}:`, err.message));
         } catch (error: any) {
             console.error(`[Pipeline] Validation failed for ${filePath}:`, error.message);
@@ -125,17 +128,19 @@ export class StreamingPipeline {
     /**
      * Stage 2: Fast Queue Phase
      * - Extract metadata (filename parsing, FFmpeg analysis)
-     * - Compute midhash256 (< 1s)
+     * - Use midhash256 from meta-core (or compute locally if not provided)
      * - Store to KV (file becomes accessible in VFS)
      * - Queue for background processing
+     * @param filePath - Path to the file
+     * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
-    private async processLightPhase(filePath: string): Promise<void> {
+    private async processLightPhase(filePath: string, midhash256?: string): Promise<void> {
         try {
-            // Call light processing
+            // Call light processing with midhash256 from meta-core
             const current = this.fastProcessedCount + 1;
             const queueSize = this.discoveredCount;
 
-            await this.config.fileProcessor.processLightPhase(filePath, current, queueSize);
+            await this.config.fileProcessor.processLightPhase(filePath, current, queueSize, midhash256);
 
             // After light processing, add to VFS
             const metadata = this.config.fileProcessor.getDatabase().get(filePath);
@@ -231,23 +236,27 @@ export class StreamingPipeline {
     }
 
     /**
-     * Handle file added event (from chokidar)
+     * Handle file added event (from FileEventConsumer via meta-core)
+     * @param filePath - Path to the file
+     * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
-    async handleFileAdded(filePath: string): Promise<void> {
+    async handleFileAdded(filePath: string, midhash256?: string): Promise<void> {
 
-        // Process through validation stage
-        this.validationQueue.add(() => this.validateFile(filePath))
+        // Process through validation stage, passing midhash256
+        this.validationQueue.add(() => this.validateFile(filePath, midhash256))
             .catch(err => console.error(`[Pipeline] Error processing added file ${filePath}:`, err.message));
     }
 
     /**
-     * Handle file changed event (from chokidar)
+     * Handle file changed event (from FileEventConsumer via meta-core)
+     * @param filePath - Path to the file
+     * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
-    async handleFileChanged(filePath: string): Promise<void> {
+    async handleFileChanged(filePath: string, midhash256?: string): Promise<void> {
 
         // Reprocess through validation stage
         this.config.stateManager.removeFile(filePath);
-        this.validationQueue.add(() => this.validateFile(filePath))
+        this.validationQueue.add(() => this.validateFile(filePath, midhash256))
             .catch(err => console.error(`[Pipeline] Error processing changed file ${filePath}:`, err.message));
     }
 
