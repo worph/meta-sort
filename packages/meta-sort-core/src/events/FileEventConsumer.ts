@@ -15,6 +15,7 @@ interface Pipeline {
     handleFileAdded(filePath: string, midhash256?: string): void;
     handleFileChanged(filePath: string, midhash256?: string): void;
     handleFileDeleted(filePath: string): void;
+    reset(): Promise<void>;
 }
 
 // Redis Stream configuration
@@ -112,19 +113,22 @@ export class FileEventConsumer {
             return `${this.filesPath}/${relativePath}`;
         };
 
-        const absolutePath = toAbsolutePath(message.path);
-
         switch (message.type) {
+            case 'reset':
+                console.log(`[FileEventConsumer] Received reset event from watcher: ${message.watcherId || 'all'}`);
+                await this.pipeline.reset();
+                break;
+
             case 'add':
-                this.pipeline.handleFileAdded(absolutePath, message.midhash256);
+                this.pipeline.handleFileAdded(toAbsolutePath(message.path), message.midhash256);
                 break;
 
             case 'change':
-                this.pipeline.handleFileChanged(absolutePath, message.midhash256);
+                this.pipeline.handleFileChanged(toAbsolutePath(message.path), message.midhash256);
                 break;
 
             case 'delete':
-                this.pipeline.handleFileDeleted(absolutePath);
+                this.pipeline.handleFileDeleted(toAbsolutePath(message.path));
                 break;
 
             case 'rename':
@@ -132,7 +136,7 @@ export class FileEventConsumer {
                 if (message.oldPath) {
                     this.pipeline.handleFileDeleted(toAbsolutePath(message.oldPath));
                 }
-                this.pipeline.handleFileAdded(absolutePath, message.midhash256);
+                this.pipeline.handleFileAdded(toAbsolutePath(message.path), message.midhash256);
                 break;
 
             default:

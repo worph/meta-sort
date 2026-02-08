@@ -1,15 +1,15 @@
 /**
  * Redis KV Client - Implements IKVClient interface using Redis
  *
- * Uses Redis hashes for efficient nested key storage:
- * - Each file's metadata is stored as a Redis hash
- * - Hash key: file:{hashId}
- * - Hash field: property/path (e.g., "video/codec")
+ * Uses flat keys for file metadata storage:
+ * - Each file property is stored as a separate Redis key
+ * - Key format: file:{hashId}/{property} (e.g., "file:abc123/video/codec")
+ * - Index set: file:__index__ contains all hashIds
  *
- * Benefits of Redis hashes:
- * - Single command to get all file metadata (HGETALL)
- * - Single command to set multiple properties (HMSET)
- * - Atomic operations on file metadata
+ * Benefits of flat keys:
+ * - Enables Redis keyspace notifications for field-level changes
+ * - Allows services to subscribe to specific field patterns (e.g., "file:*\/tmdb")
+ * - Compatible with meta:events stream for real-time updates
  */
 
 import * as IORedis from 'ioredis';
@@ -28,15 +28,16 @@ type RedisInstance = InstanceType<typeof Redis>;
 
 /**
  * Stream message from Redis Streams
- * File events from meta-core: add, change, delete, rename
+ * File events from meta-core: add, change, delete, rename, reset
  */
 export interface StreamMessage {
     id: string;
-    type: 'add' | 'change' | 'delete' | 'rename';
+    type: 'add' | 'change' | 'delete' | 'rename' | 'reset';
     path: string;
     size?: string;
     midhash256?: string;  // midhash256 CID computed by meta-core
     oldPath?: string;
+    watcherId?: string;   // For reset events
     timestamp: string;
 }
 
@@ -53,6 +54,7 @@ interface RedisClientConfig {
 
 export class RedisKVClient implements IKVClient {
     private redis: RedisInstance;
+    private streamRedis: RedisInstance | null = null; // Separate connection for blocking stream consumer
     private timeout: number;
     private prefix: string;
     private isConnected: boolean = false;
@@ -256,12 +258,13 @@ export class RedisKVClient implements IKVClient {
     }
 
     // ========================================================================
-    // High-Level Metadata Operations (Using Redis Hashes)
+    // High-Level Metadata Operations (Using Flat Keys)
     // ========================================================================
 
     /**
-     * Store file metadata using Redis hash
-     * More efficient than individual keys - single HMSET command
+     * Store file metadata using flat keys
+     * Each property is stored as a separate key: file:{hashId}/{property}
+     * Enables keyspace notifications for field-level changes
      */
     async setMetadataFlat(
         hashId: string,
@@ -273,49 +276,61 @@ export class RedisKVClient implements IKVClient {
 
         if (pairs.length === 0) return;
 
-        // Convert to Redis hash format
-        // Hash key: file:{hashId}
-        // Hash fields: property paths (without /file/{hashId} prefix)
-        const hashKey = this.buildKey(`file:${hashId}`);
-        const hashData: Record<string, string> = {};
+        // Use pipeline for efficient batch SET operations
+        const pipeline = this.redis.pipeline();
 
         for (const pair of pairs) {
             // Extract field name by removing the prefix
             const field = pair.key.slice(prefix.length + 1); // +1 for trailing /
             if (field) {
-                hashData[field] = pair.value;
+                // Key format: file:{hashId}/{property}
+                const redisKey = this.buildKey(`file:${hashId}/${field}`);
+                pipeline.set(redisKey, pair.value);
             }
         }
 
-        if (Object.keys(hashData).length > 0) {
-            await this.redis.hmset(hashKey, hashData);
-        }
+        await pipeline.exec();
 
-        // Also store in key index for getAllHashIds
+        // Maintain index set for getAllHashIds
         await this.redis.sadd(this.buildKey('file:__index__'), hashId);
     }
 
     async getMetadataFlat(hashId: string): Promise<any | null> {
-        const hashKey = this.buildKey(`file:${hashId}`);
-        const hashData = await this.redis.hgetall(hashKey);
+        const keyPrefix = this.buildKey(`file:${hashId}/`);
 
-        if (!hashData || Object.keys(hashData).length === 0) {
-            return null;
-        }
+        // Scan for all keys with this prefix
+        const keys: string[] = [];
+        let cursor = '0';
+        do {
+            const [nextCursor, batch] = await this.redis.scan(
+                cursor,
+                'MATCH',
+                `${keyPrefix}*`,
+                'COUNT',
+                1000
+            );
+            cursor = nextCursor;
+            keys.push(...batch);
+        } while (cursor !== '0');
 
-        // Convert Redis hash back to KeyValuePair format for reconstruction
+        if (keys.length === 0) return null;
+
+        // Get all values
+        const values = await this.redis.mget(...keys);
+
+        // Reconstruct as KeyValuePair format
         const prefix = buildFilePrefix(hashId);
-        const pairs: KeyValuePair[] = Object.entries(hashData).map(([field, value]) => ({
-            key: `${prefix}/${field}`,
-            value: value as string
-        }));
+        const pairs: KeyValuePair[] = keys.map((key, i) => {
+            const field = key.slice(keyPrefix.length);
+            return { key: `${prefix}/${field}`, value: values[i] as string };
+        }).filter(p => p.value !== null);
 
         return reconstructMetadata(pairs, prefix);
     }
 
     async getMetadata(hashId: string, propertyPath: string): Promise<any | null> {
-        const hashKey = this.buildKey(`file:${hashId}`);
-        const value = await this.redis.hget(hashKey, propertyPath);
+        const key = this.buildKey(`file:${hashId}/${propertyPath}`);
+        const value = await this.redis.get(key);
 
         if (value === null) return null;
 
@@ -328,24 +343,38 @@ export class RedisKVClient implements IKVClient {
 
     /**
      * Set a single metadata property for a file
-     * Writes directly to Redis hash field
+     * Writes to flat key: file:{hashId}/{property}
      */
     async setMetadataProperty(hashId: string, property: string, value: string): Promise<void> {
-        const hashKey = this.buildKey(`file:${hashId}`);
-        await this.redis.hset(hashKey, property, value);
+        const key = this.buildKey(`file:${hashId}/${property}`);
+        await this.redis.set(key, value);
 
         // Also ensure the file is in the index
         await this.redis.sadd(this.buildKey('file:__index__'), hashId);
     }
 
     async deleteMetadataFlat(hashId: string): Promise<number> {
-        const hashKey = this.buildKey(`file:${hashId}`);
-        const fieldCount = await this.redis.hlen(hashKey);
+        const keyPrefix = this.buildKey(`file:${hashId}/`);
 
-        await this.redis.del(hashKey);
+        // Scan and delete all keys with this prefix
+        let deletedCount = 0;
+        let cursor = '0';
+        do {
+            const [nextCursor, keys] = await this.redis.scan(
+                cursor,
+                'MATCH',
+                `${keyPrefix}*`,
+                'COUNT',
+                1000
+            );
+            cursor = nextCursor;
+            if (keys.length > 0) {
+                deletedCount += await this.redis.del(...keys);
+            }
+        } while (cursor !== '0');
+
         await this.redis.srem(this.buildKey('file:__index__'), hashId);
-
-        return fieldCount;
+        return deletedCount;
     }
 
     async getAllHashIds(): Promise<string[]> {
@@ -498,6 +527,9 @@ export class RedisKVClient implements IKVClient {
      * Start stream consumer loop
      * Reads messages using XREADGROUP and calls the handler
      *
+     * IMPORTANT: Uses a duplicate connection for the blocking XREADGROUP command
+     * to avoid blocking regular Redis operations on the main connection.
+     *
      * @param stream - Stream name
      * @param group - Consumer group name
      * @param onMessage - Handler for each message
@@ -517,14 +549,18 @@ export class RedisKVClient implements IKVClient {
         this.streamConsumerRunning = true;
         this.streamConsumerAbort = new AbortController();
 
-        console.log(`[Redis] Starting stream consumer: ${stream} (group: ${group}, consumer: ${this.consumerName})`);
+        // Create a duplicate connection for blocking operations
+        // This prevents XREADGROUP BLOCK from blocking regular Redis commands
+        this.streamRedis = this.redis.duplicate();
+        console.log(`[Redis] Starting stream consumer: ${stream} (group: ${group}, consumer: ${this.consumerName}) [using dedicated connection]`);
 
         // Consumer loop
         while (this.streamConsumerRunning && !this.streamConsumerAbort.signal.aborted) {
             try {
                 // XREADGROUP blocks waiting for new messages
                 // '>' means only read new messages (not already delivered to this consumer)
-                const result = await (this.redis.call(
+                // Use streamRedis (duplicate connection) for blocking call
+                const result = await (this.streamRedis.call(
                     'XREADGROUP',
                     'GROUP', group,
                     this.consumerName,
@@ -545,7 +581,7 @@ export class RedisKVClient implements IKVClient {
                             const message = this.parseStreamEntry(id, fields);
                             if (message) {
                                 await onMessage(message);
-                                // ACK the message after successful processing
+                                // ACK the message on main connection (non-blocking)
                                 await this.redis.xack(stream, group, id);
                             }
                         } catch (error: any) {
@@ -564,6 +600,11 @@ export class RedisKVClient implements IKVClient {
             }
         }
 
+        // Cleanup duplicate connection
+        if (this.streamRedis) {
+            await this.streamRedis.quit();
+            this.streamRedis = null;
+        }
         console.log('[Redis] Stream consumer stopped');
     }
 
@@ -596,7 +637,8 @@ export class RedisKVClient implements IKVClient {
             return null;
         }
 
-        if (!fieldMap.path) {
+        // Reset events don't require a path
+        if (!fieldMap.path && fieldMap.type !== 'reset') {
             console.warn(`[Redis] Invalid stream entry ${id}: missing path for ${fieldMap.type} event`);
             return null;
         }
@@ -604,10 +646,11 @@ export class RedisKVClient implements IKVClient {
         return {
             id,
             type: fieldMap.type as StreamMessage['type'],
-            path: fieldMap.path,
+            path: fieldMap.path || '',
             size: fieldMap.size,
             midhash256: fieldMap.midhash256,
             oldPath: fieldMap.oldPath,
+            watcherId: fieldMap.watcherId,
             timestamp: fieldMap.timestamp || '0',
         };
     }

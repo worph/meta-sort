@@ -829,25 +829,22 @@ export class UnifiedAPIServer {
       try {
         console.log('Clearing all metadata via API');
 
-        // Get all file keys and delete them
+        // Get all file keys and delete them using flat key deletion
         const hashIds = await this.kvClient.getAllHashIds();
         let deletedCount = 0;
 
         for (const hashId of hashIds) {
           try {
-            await this.kvClient.delete(`/file/${hashId}`);
+            // Use deleteMetadataFlat to delete all flat keys for this file
+            await this.kvClient.deleteMetadataFlat(hashId);
             deletedCount++;
           } catch (err) {
-            console.warn(`Failed to delete key /file/${hashId}:`, err);
+            console.warn(`Failed to delete metadata for ${hashId}:`, err);
           }
         }
 
-        // Also delete the index key
-        try {
-          await this.kvClient.delete('/file/__index__');
-        } catch (err) {
-          // Index might not exist
-        }
+        // Note: deleteMetadataFlat already removes from file:__index__
+        // No need to delete the index separately
 
         console.log(`Cleared ${deletedCount} file metadata entries`);
 
