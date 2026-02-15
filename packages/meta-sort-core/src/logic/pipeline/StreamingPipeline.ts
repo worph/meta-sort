@@ -23,6 +23,12 @@ export class StreamingPipeline {
     private fastProcessedCount = 0;
     private backgroundProcessedCount = 0;
 
+    // Reset generation counter - incremented on each reset
+    // Used to ignore callbacks from tasks started before the reset
+    private resetGeneration = 0;
+    // Track which generation each file was started in
+    private fileGenerations: Map<string, number> = new Map();
+
     constructor(config: PipelineConfig) {
         this.config = config;
 
@@ -108,6 +114,13 @@ export class StreamingPipeline {
             // Note: Skipped for performance - extension check is sufficient
             // If needed, could add MIME validation via external library
 
+            // Check generation before incrementing counter
+            // Reset may have happened during validation
+            if (this.fileGenerations.get(filePath) !== this.resetGeneration) {
+                this.config.stateManager.removeFile(filePath);
+                return;
+            }
+
             this.validatedCount++;
 
             // Remove from discovered - file will be tracked by PQueue pending
@@ -135,6 +148,13 @@ export class StreamingPipeline {
      * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
     private async processLightPhase(filePath: string, midhash256?: string): Promise<void> {
+        // Check if this file is from the current reset generation
+        const fileGeneration = this.fileGenerations.get(filePath);
+        if (fileGeneration !== this.resetGeneration) {
+            console.log(`[Pipeline] Ignoring stale light phase for ${filePath}`);
+            return;
+        }
+
         try {
             // Call light processing with midhash256 from meta-core
             const current = this.fastProcessedCount + 1;
@@ -171,8 +191,22 @@ export class StreamingPipeline {
                     .catch(err => console.error(`[Pipeline] Background queue error for ${filePath}:`, err.message));
             }
 
+            // Check generation again before incrementing counter
+            // Reset may have happened during processing
+            if (this.fileGenerations.get(filePath) !== this.resetGeneration) {
+                console.log(`[Pipeline] Ignoring stale fast queue completion for ${filePath}`);
+                return;
+            }
+
             this.fastProcessedCount++;
         } catch (error: any) {
+            // Check if this file is from the current reset generation
+            const fileGeneration = this.fileGenerations.get(filePath);
+            if (fileGeneration !== this.resetGeneration) {
+                console.log(`[Pipeline] Ignoring stale fast queue failure for ${filePath}`);
+                return;
+            }
+
             // Processing failed - mark as failed (manual retry available via UI)
             console.error(`[Pipeline] Fast queue processing failed for ${filePath}: ${error.message}`);
 
@@ -196,12 +230,26 @@ export class StreamingPipeline {
      * - Mark processing as complete (if no container plugins)
      */
     private async processHashPhase(filePath: string): Promise<void> {
+        // Check if this file is from the current reset generation
+        const fileGeneration = this.fileGenerations.get(filePath);
+        if (fileGeneration !== this.resetGeneration) {
+            console.log(`[Pipeline] Ignoring stale hash phase for ${filePath}`);
+            return;
+        }
+
         try {
             // Call hash processing
             const current = this.backgroundProcessedCount + 1;
             const queueSize = this.discoveredCount;
 
             await this.config.fileProcessor.processHashPhase(filePath, current, queueSize);
+
+            // Check generation again before incrementing counter
+            // Reset may have happened during processing
+            if (this.fileGenerations.get(filePath) !== this.resetGeneration) {
+                console.log(`[Pipeline] Ignoring stale hash phase completion for ${filePath}`);
+                return;
+            }
 
             this.backgroundProcessedCount++;
 
@@ -216,9 +264,17 @@ export class StreamingPipeline {
                 } catch {
                     // Renaming rule may fail for incomplete metadata
                 }
+                // Clean up generation tracking
+                this.fileGenerations.delete(filePath);
                 this.config.stateManager.completeHashProcessing(filePath, hashId, virtualPath);
             }
         } catch (error: any) {
+            // Check generation again after processing (in case reset happened during processing)
+            if (this.fileGenerations.get(filePath) !== this.resetGeneration) {
+                console.log(`[Pipeline] Ignoring stale hash phase failure for ${filePath}`);
+                return;
+            }
+
             // Processing failed - mark as failed (manual retry available via UI)
             console.error(`[Pipeline] Background queue processing failed for ${filePath}: ${error.message}`);
 
@@ -229,6 +285,9 @@ export class StreamingPipeline {
                 1,
                 'hash'
             );
+
+            // Clean up generation tracking
+            this.fileGenerations.delete(filePath);
 
             // Complete with error
             this.config.stateManager.completeHashProcessing(filePath, undefined, undefined, error.message);
@@ -241,6 +300,8 @@ export class StreamingPipeline {
      * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
     async handleFileAdded(filePath: string, midhash256?: string): Promise<void> {
+        // Track which generation this file was started in
+        this.fileGenerations.set(filePath, this.resetGeneration);
 
         // Process through validation stage, passing midhash256
         this.validationQueue.add(() => this.validateFile(filePath, midhash256))
@@ -253,6 +314,8 @@ export class StreamingPipeline {
      * @param midhash256 - Pre-computed midhash256 from meta-core (if available)
      */
     async handleFileChanged(filePath: string, midhash256?: string): Promise<void> {
+        // Track which generation this file was started in
+        this.fileGenerations.set(filePath, this.resetGeneration);
 
         // Reprocess through validation stage
         this.config.stateManager.removeFile(filePath);
@@ -325,9 +388,25 @@ export class StreamingPipeline {
      * Note: meta-fuse listens to file:events stream from meta-core for updates
      */
     async reset(): Promise<void> {
-        console.log('[Pipeline] Resetting counters and state...');
+        // Increment reset generation FIRST - this invalidates all in-flight tasks
+        this.resetGeneration++;
+        console.log(`[Pipeline] Resetting counters and state (generation ${this.resetGeneration})...`);
 
-        // Reset counters
+        // Step 1: Clear all queues to cancel pending tasks
+        // This prevents in-flight tasks from incrementing counters after reset
+        this.validationQueue.clear();
+        this.fastQueue.clear();
+        this.backgroundQueue.clear();
+
+        // Clear container plugin scheduler if available
+        if (this.config.containerPluginScheduler) {
+            this.config.containerPluginScheduler.clear();
+        }
+
+        // Clear file generation tracking
+        this.fileGenerations.clear();
+
+        // Step 2: Reset counters
         this.discoveredCount = 0;
         this.validatedCount = 0;
         this.fastProcessedCount = 0;
@@ -335,6 +414,9 @@ export class StreamingPipeline {
 
         // Clear state manager (discovered, processing, done states)
         this.config.stateManager.clear();
+
+        // Reset performance metrics (including failed files counter)
+        performanceMetrics.reset();
 
         console.log('[Pipeline] Reset complete');
     }
@@ -427,7 +509,36 @@ export class StreamingPipeline {
 
         // Listen for file:complete events to transition files to done state
         scheduler.on('file:complete', async ({ fileHash, filePath }) => {
+            // Check if this file was started in the current reset generation
+            // If not, ignore this callback - the file was from a previous reset cycle
+            const fileGeneration = this.fileGenerations.get(filePath);
+            if (fileGeneration !== this.resetGeneration) {
+                console.log(`[Pipeline] Ignoring stale callback for ${filePath} (gen ${fileGeneration} vs current ${this.resetGeneration})`);
+                return;
+            }
+
+            // Additional check: verify file is actually in hashProcessing state
+            // This handles the race condition where:
+            // 1. Old task starts with gen 1, enters hashProcessing
+            // 2. Reset clears state and increments to gen 2
+            // 3. New task starts with same filePath, sets fileGenerations[filePath] = 2
+            // 4. Old task completes, passes generation check (sees gen 2), but shouldn't complete
+            // The file's hash in hashProcessing state should match the callback's fileHash
+            const hashProcessingState = this.config.stateManager.getHashProcessingFiles().get(filePath);
+            if (!hashProcessingState) {
+                console.log(`[Pipeline] Ignoring orphan callback for ${filePath} (not in hashProcessing state)`);
+                return;
+            }
+            // Verify hash matches - if different, this is a stale callback for an old task
+            if (hashProcessingState.hash && hashProcessingState.hash !== fileHash) {
+                console.log(`[Pipeline] Ignoring stale callback for ${filePath} (hash mismatch: ${hashProcessingState.hash} vs ${fileHash})`);
+                return;
+            }
+
             console.log(`[Pipeline] Container plugins complete for ${filePath} (${fileHash})`);
+
+            // Clean up generation tracking
+            this.fileGenerations.delete(filePath);
 
             // Fetch metadata from Redis (container plugins write directly to Redis via /meta API)
             let virtualPath: string | undefined;

@@ -565,16 +565,8 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 }
             } else {
                 console.error(`Error in hash processing for ${filePath}:`, e);
-
-                // Mark hash processing as failed for real errors
-                if (this.unifiedStateManager) {
-                    this.unifiedStateManager.completeHashProcessing(
-                        filePath,
-                        undefined,
-                        undefined,
-                        e instanceof Error ? e.message : String(e)
-                    );
-                }
+                // Note: StreamingPipeline handles error completion via its catch block
+                // to avoid double-counting. Do not call completeHashProcessing here.
             }
             throw e;
         } finally {

@@ -595,6 +595,19 @@ export class RedisKVClient implements IKVClient {
                     break;
                 }
                 console.error('[Redis] Stream consumer error:', error.message);
+
+                // Handle NOGROUP error - consumer group was deleted (e.g., stream cleared)
+                // Recreate the consumer group to recover
+                if (error.message?.includes('NOGROUP')) {
+                    console.log('[Redis] Consumer group was deleted, recreating...');
+                    try {
+                        await this.initStreamConsumer(stream, group);
+                        console.log('[Redis] Consumer group recreated, resuming consumption');
+                    } catch (initError: any) {
+                        console.error('[Redis] Failed to recreate consumer group:', initError.message);
+                    }
+                }
+
                 // Brief pause before retrying
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
