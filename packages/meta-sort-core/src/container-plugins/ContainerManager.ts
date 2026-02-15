@@ -73,7 +73,7 @@ function getContainerName(pluginId: string, instanceIndex: number): string {
  *     /files/corn     - SMB mounts (mounted by rclone inside meta-sort)
  *
  * WebDAV configuration:
- *   - PLUGIN_WEBDAV_URL: WebDAV endpoint URL (e.g., "http://meta-sort-dev/webdav")
+ *   - webdavUrl: Retrieved from meta-core /urls API via LeaderClient
  *
  * Benefits:
  *   - Works with Docker's overlay filesystem (no NFS file handle issues)
@@ -103,15 +103,16 @@ export class ContainerManager extends EventEmitter {
         private filesPath: string = config.FILES_PATH,
         callbackUrl?: string,
         metaCoreUrl?: string,
+        webdavUrl?: string,
         dockerClient?: DockerClient
     ) {
         super();
         this.dockerClient = dockerClient || new DockerClient(config.DOCKER_SOCKET_PATH);
 
-        // Initialize with env vars as fallback (will be overridden by service discovery)
+        // Initialize with provided values or env vars as fallback
         this.callbackUrl = callbackUrl ?? config.CONTAINER_CALLBACK_URL;
         this.metaCoreUrl = metaCoreUrl ?? config.CONTAINER_META_CORE_URL;
-        this.webdavUrl = config.PLUGIN_WEBDAV_URL;
+        this.webdavUrl = webdavUrl;
 
         // Configure stack name for Docker Desktop grouping
         this.stackName = config.PLUGIN_STACK_NAME;
@@ -119,27 +120,25 @@ export class ContainerManager extends EventEmitter {
 
     /**
      * Discover service URLs from meta-core service discovery file
-     * Explicit env vars (CONTAINER_CALLBACK_URL, PLUGIN_WEBDAV_URL) take priority
-     * Service discovery is only used as fallback
+     * WebDAV URL should be passed via constructor (from LeaderClient/meta-core API)
+     * Service discovery is used for callback URL fallback
      */
     private async discoverServiceUrls(): Promise<void> {
-        // Check if explicit env vars are set - these take priority for container communication
-        const explicitCallbackUrl = config.CONTAINER_CALLBACK_URL;
-        const explicitWebdavUrl = config.PLUGIN_WEBDAV_URL;
+        // Log WebDAV URL (should be set from meta-core API via LeaderClient)
+        if (this.webdavUrl) {
+            console.log(`[ContainerManager] Using WebDAV URL from meta-core: ${this.webdavUrl}`);
+        }
 
+        // Check if callback URL is already set
+        const explicitCallbackUrl = config.CONTAINER_CALLBACK_URL;
         if (explicitCallbackUrl) {
             this.callbackUrl = explicitCallbackUrl;
             console.log(`[ContainerManager] Using explicit callback URL: ${this.callbackUrl}`);
         }
 
-        if (explicitWebdavUrl) {
-            this.webdavUrl = explicitWebdavUrl;
-            console.log(`[ContainerManager] Using explicit WebDAV URL: ${this.webdavUrl}`);
-        }
-
-        // If both are explicitly set, skip service discovery
-        if (explicitCallbackUrl && explicitWebdavUrl) {
-            console.log('[ContainerManager] Using explicit env vars, skipping service discovery');
+        // If both are set, skip service discovery
+        if (this.callbackUrl && this.webdavUrl) {
+            console.log('[ContainerManager] All URLs configured, skipping service discovery');
             return;
         }
 
@@ -154,8 +153,8 @@ export class ContainerManager extends EventEmitter {
             const api = serviceInfo.api;
             const endpoints = serviceInfo.endpoints || {};
 
-            // Only use service discovery if env var not set
-            if (!explicitCallbackUrl) {
+            // Use service discovery for callback URL if not set
+            if (!this.callbackUrl) {
                 if (endpoints.callback) {
                     this.callbackUrl = endpoints.callback;
                     console.log(`[ContainerManager] Discovered callback URL: ${this.callbackUrl}`);
@@ -166,7 +165,8 @@ export class ContainerManager extends EventEmitter {
                 }
             }
 
-            if (!explicitWebdavUrl) {
+            // Use service discovery for WebDAV URL if not set (fallback)
+            if (!this.webdavUrl) {
                 if (endpoints.webdav) {
                     this.webdavUrl = endpoints.webdav;
                     console.log(`[ContainerManager] Discovered WebDAV URL: ${this.webdavUrl}`);
@@ -186,9 +186,9 @@ export class ContainerManager extends EventEmitter {
 
             console.log('[ContainerManager] Service discovery successful');
         } catch (error) {
-            console.warn(`[ContainerManager] Service discovery failed, using env vars: ${error}`);
-            console.log(`[ContainerManager] Using fallback callback URL: ${this.callbackUrl}`);
-            console.log(`[ContainerManager] Using fallback WebDAV URL: ${this.webdavUrl || 'not set'}`);
+            console.warn(`[ContainerManager] Service discovery failed: ${error}`);
+            console.log(`[ContainerManager] Using callback URL: ${this.callbackUrl}`);
+            console.log(`[ContainerManager] Using WebDAV URL: ${this.webdavUrl || 'not set'}`);
         }
     }
 
@@ -429,7 +429,7 @@ export class ContainerManager extends EventEmitter {
 
         // No file mounts needed - plugins access files via WebDAV
         if (!this.webdavUrl) {
-            console.warn(`[ContainerManager] WARNING: WebDAV not configured. Plugin '${pluginId}' won't have access to files. Set PLUGIN_WEBDAV_URL.`);
+            console.warn(`[ContainerManager] WARNING: WebDAV not configured. Plugin '${pluginId}' won't have access to files. Ensure meta-core is running and accessible.`);
         }
 
         // Create container
@@ -1034,7 +1034,8 @@ export class ContainerManager extends EventEmitter {
  */
 export function createContainerManager(
     configPath?: string,
-    network?: string
+    network?: string,
+    webdavUrl?: string
 ): ContainerManager {
-    return new ContainerManager(configPath, network);
+    return new ContainerManager(configPath, network, undefined, undefined, undefined, webdavUrl);
 }

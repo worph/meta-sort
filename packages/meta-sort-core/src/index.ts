@@ -178,7 +178,23 @@ process.on('SIGINT', async () => {
         if (existsSync(config.CONTAINER_PLUGINS_CONFIG)) {
             console.log('[Startup] Initializing container plugins...');
             try {
-                containerManager = new ContainerManager();
+                // Get webdavUrl from meta-core via LeaderClient
+                const leaderInfo = kvManager?.getLeaderInfo();
+                const webdavUrl = leaderInfo?.webdavUrl;
+                if (webdavUrl) {
+                    console.log(`[Startup] WebDAV URL from meta-core: ${webdavUrl}`);
+                } else {
+                    console.warn('[Startup] WebDAV URL not available from meta-core');
+                }
+
+                containerManager = new ContainerManager(
+                    config.CONTAINER_PLUGINS_CONFIG,
+                    config.CONTAINER_NETWORK,
+                    config.FILES_PATH,
+                    undefined, // callbackUrl - use env var default
+                    undefined, // metaCoreUrl - use env var default
+                    webdavUrl  // webdavUrl from meta-core API
+                );
                 await containerManager.initialize();
 
                 // Connect container manager to plugin manager

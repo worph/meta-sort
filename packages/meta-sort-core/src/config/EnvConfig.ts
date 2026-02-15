@@ -89,13 +89,6 @@ interface EnvConfig {
     /** Docker network for plugin containers (default: 'meta-network') */
     CONTAINER_NETWORK: string;
 
-    /**
-     * WebDAV URL for plugin file access.
-     * Plugins access /files via this WebDAV endpoint served by meta-sort nginx.
-     * Example: "http://meta-sort-dev/webdav"
-     */
-    PLUGIN_WEBDAV_URL?: string;
-
     /** Docker Compose project name for grouping containers in Docker Desktop (optional). When set, plugin containers appear grouped as a stack. */
     PLUGIN_STACK_NAME?: string;
 
@@ -151,9 +144,8 @@ export const config: EnvConfig = {
     CONTAINER_PLUGINS_CONFIG: process.env.CONTAINER_PLUGINS_CONFIG || '/app/plugins.yml',
     DOCKER_SOCKET_PATH: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock',
     CONTAINER_CALLBACK_URL: process.env.CONTAINER_CALLBACK_URL || 'http://meta-sort:8180',
-    CONTAINER_META_CORE_URL: process.env.CONTAINER_META_CORE_URL || 'http://meta-sort:9000',
+    CONTAINER_META_CORE_URL: process.env.CONTAINER_META_CORE_URL || 'http://meta-sort',
     CONTAINER_NETWORK: process.env.CONTAINER_NETWORK || 'meta-network',
-    PLUGIN_WEBDAV_URL: process.env.PLUGIN_WEBDAV_URL,
     PLUGIN_STACK_NAME: process.env.PLUGIN_STACK_NAME,
     PLUGIN_CACHE_HOST_PATH: process.env.PLUGIN_CACHE_HOST_PATH,
 
