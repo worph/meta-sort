@@ -178,9 +178,9 @@ process.on('SIGINT', async () => {
         if (existsSync(config.CONTAINER_PLUGINS_CONFIG)) {
             console.log('[Startup] Initializing container plugins...');
             try {
-                // Get webdavUrl from meta-core via LeaderClient
+                // Get webdavUrlInternal from meta-core via LeaderClient (for container-to-container access)
                 const leaderInfo = kvManager?.getLeaderInfo();
-                const webdavUrl = leaderInfo?.webdavUrl;
+                const webdavUrl = leaderInfo?.webdavUrlInternal ?? leaderInfo?.webdavUrl;
                 if (webdavUrl) {
                     console.log(`[Startup] WebDAV URL from meta-core: ${webdavUrl}`);
                 } else {
