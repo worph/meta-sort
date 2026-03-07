@@ -396,10 +396,12 @@ export class UnifiedAPIServer {
         const backgroundQueueRunning = queueStatus.backgroundQueue?.running || 0;
         const backgroundQueuePending = queueStatus.backgroundQueue?.pending || 0;
 
-        // "Discovered" now represents files waiting for fast queue (validated but not yet processing)
-        // This merges the old "discovered" and "awaitingFastQueue" concepts
-        snapshot.totalDiscovered = fastQueuePending;
-        snapshot.awaitingFastQueue = fastQueuePending; // Keep for backward compatibility
+        // "Discovered" now represents unique files waiting for fast queue (validated but not yet processing)
+        // Use file count from container scheduler if available, otherwise fall back to task count
+        const filesStatus = queueStatus.files;
+        const uniqueFilesWaiting = filesStatus ? (filesStatus.fastWaiting + filesStatus.fastRunning) : fastQueuePending;
+        snapshot.totalDiscovered = uniqueFilesWaiting;
+        snapshot.awaitingFastQueue = uniqueFilesWaiting; // Keep for backward compatibility
 
         // Fix awaitingBackground: subtract files currently being processed by background workers
         // hashProcessing.size includes both waiting AND running files
@@ -443,6 +445,14 @@ export class UnifiedAPIServer {
       // Add failed files count from metrics
       const metrics = performanceMetrics.getMetrics();
       snapshot.totalFailed = metrics.totalFailedFiles || 0;
+
+      // Add filtered count from pipeline stats
+      if (this.streamingPipeline) {
+        const pipelineStats = this.streamingPipeline.getStats();
+        snapshot.totalFiltered = pipelineStats.filtered || 0;
+      } else {
+        snapshot.totalFiltered = 0;
+      }
 
       return snapshot;
     });

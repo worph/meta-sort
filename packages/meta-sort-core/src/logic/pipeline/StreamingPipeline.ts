@@ -20,6 +20,7 @@ export class StreamingPipeline {
 
     private discoveredCount = 0;
     private validatedCount = 0;
+    private filteredCount = 0;  // Files filtered out (unsupported extensions)
     private fastProcessedCount = 0;
     private backgroundProcessedCount = 0;
 
@@ -106,6 +107,7 @@ export class StreamingPipeline {
             const ext = path.extname(filePath).toLowerCase();
             if (!this.config.supportedExtensions.has(ext)) {
                 // Skip unsupported file types - remove from discovered
+                this.filteredCount++;
                 this.config.stateManager.removeFile(filePath);
                 return;
             }
@@ -353,6 +355,7 @@ export class StreamingPipeline {
         return {
             discovered: this.discoveredCount,
             validated: this.validatedCount,
+            filtered: this.filteredCount,
             fastProcessed: this.fastProcessedCount,
             backgroundProcessed: this.backgroundProcessedCount,
             queues: {
@@ -396,6 +399,7 @@ export class StreamingPipeline {
         // Step 2: Reset counters
         this.discoveredCount = 0;
         this.validatedCount = 0;
+        this.filteredCount = 0;
         this.fastProcessedCount = 0;
         this.backgroundProcessedCount = 0;
 

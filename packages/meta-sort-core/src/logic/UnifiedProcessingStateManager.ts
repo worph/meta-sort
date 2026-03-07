@@ -57,6 +57,14 @@ export interface UnifiedProcessingSnapshot {
   /** Files that completed fast queue but are waiting for background queue */
   awaitingBackground: number;
 
+  // Filtering/duplicate metrics
+  /** Files filtered out due to unsupported extensions (non-media files) */
+  totalFiltered?: number;
+  /** Files with same content hash as previously processed file */
+  totalDuplicates?: number;
+  /** Number of unique content hashes seen */
+  uniqueHashes?: number;
+
   // Configuration
   fastQueueConcurrency?: number;       // Number of fast queue workers
   backgroundQueueConcurrency?: number; // Number of background queue workers
@@ -69,6 +77,10 @@ export class UnifiedProcessingStateManager {
   private done: UnifiedFileState[] = [];
   private maxDoneHistory = 100; // Keep last 100 completed files
   private totalProcessedCount = 0; // Track total number of completed files (not limited)
+
+  // Duplicate tracking
+  private seenHashes: Set<string> = new Set();
+  private duplicateCount = 0; // Files with same hash as a previously processed file
 
   /**
    * Add a file to discovered state (file discovered)
@@ -124,6 +136,13 @@ export class UnifiedProcessingStateManager {
       // If error, mark as done with error
       this.completeHashProcessing(filePath, hash, virtualPath, error);
       return;
+    }
+
+    // Track duplicates - if hash already seen, increment duplicate counter
+    if (this.seenHashes.has(hash)) {
+      this.duplicateCount++;
+    } else {
+      this.seenHashes.add(hash);
     }
 
     // Move to hash processing queue
@@ -273,6 +292,10 @@ export class UnifiedProcessingStateManager {
       // Files that completed fast queue but are waiting for/in background queue
       awaitingBackground: this.hashProcessing.size,
 
+      // Duplicate tracking (filtered count is added by API layer from pipeline stats)
+      totalDuplicates: this.duplicateCount,
+      uniqueHashes: this.seenHashes.size,
+
       fastQueueConcurrency,
       backgroundQueueConcurrency
     };
@@ -296,6 +319,8 @@ export class UnifiedProcessingStateManager {
     this.hashProcessing.clear();
     this.done = [];
     this.totalProcessedCount = 0;
+    this.seenHashes.clear();
+    this.duplicateCount = 0;
   }
 
   /**
@@ -365,5 +390,15 @@ export class UnifiedProcessingStateManager {
    */
   getHashProcessingFiles(): Map<string, UnifiedFileState> {
     return this.hashProcessing;
+  }
+
+  /**
+   * Get duplicate tracking statistics
+   */
+  getDuplicateStats(): { duplicateCount: number; uniqueHashes: number } {
+    return {
+      duplicateCount: this.duplicateCount,
+      uniqueHashes: this.seenHashes.size
+    };
   }
 }

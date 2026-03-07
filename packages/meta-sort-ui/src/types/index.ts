@@ -89,6 +89,12 @@ export interface ProcessingStatus {
     totalDone: number;
     /** Total number of failed files */
     totalFailed?: number;
+    /** Files filtered out due to unsupported extensions (non-media files) */
+    totalFiltered?: number;
+    /** Files with same content hash as previously processed file */
+    totalDuplicates?: number;
+    /** Number of unique content hashes seen */
+    uniqueHashes?: number;
     /** @deprecated Use totalDiscovered instead. Kept for backward compatibility. */
     awaitingFastQueue: number;
     /** Files that completed fast queue but are waiting for background queue */

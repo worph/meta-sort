@@ -10,7 +10,6 @@ import {
 import {
     formatMs,
     formatNumber,
-    formatUptime,
     formatBytes,
     getFilename
 } from '../utils/format';
@@ -21,6 +20,7 @@ function Monitor() {
     const [redisStats, setRedisStats] = useState<RedisStats | null>(null);
     const [queue, setQueue] = useState<QueueItem[]>([]);
     const [failedFiles, setFailedFiles] = useState<FailedFile[]>([]);
+    const [showPipelineHelp, setShowPipelineHelp] = useState(false);
 
     const fetchData = useCallback(async () => {
         try {
@@ -152,7 +152,26 @@ function Monitor() {
             {/* Pipeline Progress Bar - 6 Stage (including failed) */}
             {status && (
                 <div className="card pipeline-section">
-                    <h2>Processing Pipeline</h2>
+                    <div className="pipeline-header">
+                        <h2>Processing Pipeline</h2>
+                        <button
+                            className="help-button"
+                            onClick={() => setShowPipelineHelp(!showPipelineHelp)}
+                            title="What do these mean?"
+                        >
+                            ?
+                        </button>
+                    </div>
+                    {showPipelineHelp && (
+                        <div className="pipeline-help">
+                            <div className="help-item"><span className="help-dot discovered"></span><strong>Discovered:</strong> Files found on disk, waiting to be processed.</div>
+                            <div className="help-item"><span className="help-dot fast"></span><strong>Fast Queue:</strong> Files being processed for quick metadata extraction (hash, ffmpeg, etc.).</div>
+                            <div className="help-item"><span className="help-dot awaiting-background"></span><strong>Awaiting BG:</strong> Files done with fast processing, queued for slower tasks.</div>
+                            <div className="help-item"><span className="help-dot background"></span><strong>Background:</strong> Files running slow tasks like full file hashing or TMDB lookups.</div>
+                            <div className="help-item"><span className="help-dot done"></span><strong>Complete:</strong> Files fully processed and available in the virtual filesystem.</div>
+                            <div className="help-item"><span className="help-dot failed"></span><strong>Failed:</strong> Files that encountered errors during processing.</div>
+                        </div>
+                    )}
                     <div className="pipeline-bar-container">
                         <div className="pipeline-bar">
                             <div className="bar-segment discovered" style={{ width: `${progress.discovered}%` }} />
@@ -319,27 +338,23 @@ function Monitor() {
                         </div>
                     )}
 
-                    <h3 className="section-title">System Stats</h3>
+                    <h3 className="section-title">File Coverage</h3>
                     <div className="stats-grid">
                         <div className="stat-box">
-                            <div className="stat-value">{redisStats ? formatNumber(redisStats.fileCount) : '-'}</div>
-                            <div className="stat-label">Files in Redis</div>
+                            <div className="stat-value">{status?.uniqueHashes ? formatNumber(status.uniqueHashes) : (redisStats ? formatNumber(redisStats.fileCount) : '-')}</div>
+                            <div className="stat-label">Unique Files</div>
                         </div>
                         <div className="stat-box">
-                            <div className="stat-value">{redisStats?.memoryUsage || '-'}</div>
-                            <div className="stat-label">Redis Memory</div>
+                            <div className="stat-value">{status?.totalFiltered !== undefined ? formatNumber(status.totalFiltered) : '-'}</div>
+                            <div className="stat-label">Filtered (Non-Media)</div>
                         </div>
                         <div className="stat-box">
-                            <div className="stat-value">{metrics ? formatUptime(metrics.uptime) : '-'}</div>
-                            <div className="stat-label">Uptime</div>
+                            <div className="stat-value">{status?.totalDuplicates !== undefined ? formatNumber(status.totalDuplicates) : '-'}</div>
+                            <div className="stat-label">Duplicates (Same Hash)</div>
                         </div>
                         <div className="stat-box">
-                            <div className="stat-value">
-                                {metrics?.memoryUsage
-                                    ? `${Math.round(metrics.memoryUsage.heapUsed / 1024 / 1024)} MB`
-                                    : '-'}
-                            </div>
-                            <div className="stat-label">Node Heap</div>
+                            <div className="stat-value">{status?.totalFailed !== undefined ? formatNumber(status.totalFailed) : '-'}</div>
+                            <div className="stat-label">Failed</div>
                         </div>
                     </div>
                 </div>
@@ -517,8 +532,70 @@ function Monitor() {
                 }
 
                 .pipeline-section h2 {
+                    margin-bottom: 0;
+                }
+
+                .pipeline-header {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
                     margin-bottom: 16px;
                 }
+
+                .help-button {
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 50%;
+                    border: 1px solid var(--text-secondary);
+                    background: transparent;
+                    color: var(--text-secondary);
+                    font-size: 12px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    transition: all 0.2s ease;
+                }
+
+                .help-button:hover {
+                    background: var(--text-secondary);
+                    color: var(--bg-primary);
+                }
+
+                .pipeline-help {
+                    background: var(--bg-tertiary);
+                    border-radius: 8px;
+                    padding: 12px 16px;
+                    margin-bottom: 16px;
+                    font-size: 0.85rem;
+                    line-height: 1.6;
+                }
+
+                .help-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    margin-bottom: 6px;
+                }
+
+                .help-item:last-child {
+                    margin-bottom: 0;
+                }
+
+                .help-dot {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 50%;
+                    flex-shrink: 0;
+                }
+
+                .help-dot.discovered { background: #9ca3af; }
+                .help-dot.fast { background: #fbbf24; }
+                .help-dot.awaiting-background { background: #f472b6; }
+                .help-dot.background { background: #a78bfa; }
+                .help-dot.done { background: #34d399; }
+                .help-dot.failed { background: #f87171; }
 
                 .pipeline-bar-container {
                     margin-bottom: 16px;
