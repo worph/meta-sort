@@ -91,9 +91,6 @@ export interface ExtendedHashMeta extends HashMeta {
 
     /** Source file path */
     filePath?: string;
-
-    /** Last verification timestamp (0 = unverified, used during VFS rebuild) */
-    _lastVerified?: number;
 }
 
 // =============================================================================

@@ -21,7 +21,6 @@ function Plugins() {
     const [configEditing, setConfigEditing] = useState<Record<string, unknown> | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [scanStatus, setScanStatus] = useState<string | null>(null);
 
     // Container plugin management state
     const [showAddPluginModal, setShowAddPluginModal] = useState(false);
@@ -112,18 +111,6 @@ function Plugins() {
             alert(err.message);
         } finally {
             setLoading(false);
-        }
-    };
-
-    const triggerScan = async () => {
-        setScanStatus('Scanning...');
-        try {
-            await fetch('/api/scan/trigger', { method: 'POST' });
-            setScanStatus('Scan triggered');
-            setTimeout(() => setScanStatus(null), 3000);
-        } catch (err) {
-            console.error('Failed to trigger scan:', err);
-            setScanStatus('Scan failed');
         }
     };
 
@@ -343,13 +330,6 @@ function Plugins() {
                         disabled={loading}
                     >
                         Rescan Plugins
-                    </button>
-                    <button
-                        className="btn btn-primary"
-                        onClick={triggerScan}
-                        disabled={loading}
-                    >
-                        {scanStatus || 'Trigger File Scan'}
                     </button>
                 </div>
             </div>

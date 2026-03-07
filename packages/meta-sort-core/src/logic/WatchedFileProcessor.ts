@@ -8,11 +8,10 @@ import {FileProcessorPiscina} from "./fileProcessor/FileProcessorPiscina.js";
 import {renamingRule} from "../config/RenamingRule.js";
 import {MetaMeshFormat} from "./MetaMeshFormat.js";
 import {JellyfinAPI} from "../jellyfin/JellyfinAPI.js";
-import {VirtualFileSystem} from "../api/VirtualFileSystem.js";
 import {performanceMetrics} from "../metrics/PerformanceMetrics.js";
 import {UnifiedProcessingStateManager} from "./UnifiedProcessingStateManager.js";
 import type {IKVClient} from "../kv/IKVClient.js";
-import { type ExtendedFileAnalyzer, type ExtendedHashMeta } from "../types/ExtendedInterfaces.js";
+import { type ExtendedFileAnalyzer } from "../types/ExtendedInterfaces.js";
 import * as webdav from '../webdav/WebdavClient.js';
 import PQueue from "p-queue";
 import os from 'os';
@@ -25,7 +24,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     jellyfinAPI = new JellyfinAPI();
     metaMeshFormat = new MetaMeshFormat();
     metaDataToFolderStruct = new MetaDataToFolderStruct(renamingRule);
-    virtualFileSystem: VirtualFileSystem;
     unifiedStateManager = new UnifiedProcessingStateManager();
     fileProcessor:FileAnalyzerInterface = new FileProcessorPiscina();
     fileType = new FileType();
@@ -41,12 +39,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     private pipeline: StreamingPipeline | null = null;
 
     constructor() {
-        // Always initialize VirtualFileSystem for FUSE API
-        this.virtualFileSystem = new VirtualFileSystem({
-            fileMode: 0o644,
-            directoryMode: config.CHMOD_FOR_NEW_FOLDER || 0o755
-        });
-
         // Pass the unified state manager to the fileProcessor
         if (this.fileProcessor instanceof FileProcessorPiscina) {
             this.fileProcessor.setUnifiedStateManager(this.unifiedStateManager);
@@ -60,10 +52,6 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         console.log(`WatchedFileProcessor: TaskScheduler-based system initialized`);
         console.log(`  - Pre-process queue: ${preProcessConcurrency} workers (midhash256)`);
         console.log(`  - TaskScheduler handles plugin execution (fast/background queues)`);
-    }
-
-    getVirtualFileSystem(): VirtualFileSystem {
-        return this.virtualFileSystem;
     }
 
     getUnifiedStateManager(): UnifiedProcessingStateManager {
@@ -193,7 +181,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
             fastQueueConcurrency: config.FAST_QUEUE_CONCURRENCY,
         });
 
-        // Set up event listeners for VFS updates
+        // Set up event listeners for state manager updates
         this.setupTaskSchedulerEvents();
 
         console.log(`[WatchedFileProcessor] TaskScheduler initialized with:`);
@@ -201,50 +189,22 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     }
 
     /**
-     * Set up TaskScheduler event listeners for VFS integration
+     * Set up TaskScheduler event listeners
      * Note: Event publishing to meta-fuse is handled by meta-core (file:events stream)
      */
     private setupTaskSchedulerEvents(): void {
         if (!this.taskScheduler) return;
-
-        // When a task completes, check if we should update VFS
-        this.taskScheduler.on('task:complete', (event: any) => {
-            const { task } = event;
-
-            // Update VFS when filename-parser completes (has basic metadata)
-            if (task.pluginId === 'filename-parser') {
-                this.updateVFSForFile(task.fileHash, task.filePath);
-            }
-        });
 
         // When all tasks for a file complete
         this.taskScheduler.on('file:complete', (event: any) => {
             const { fileHash, filePath } = event;
             console.log(`[TaskScheduler] All plugins complete for ${filePath}`);
 
-            // Final VFS update with complete metadata
-            this.updateVFSForFile(fileHash, filePath);
-
             // Update unified state manager
             if (this.unifiedStateManager) {
                 this.unifiedStateManager.completeHashProcessing(filePath, fileHash);
             }
         });
-    }
-
-    /**
-     * Update VFS for a file with current metadata
-     */
-    private updateVFSForFile(fileHash: string, filePath: string): void {
-        const metadata = this.fileProcessor.getDatabase().get(filePath);
-        if (metadata && metadata.cid_midhash256) {
-            try {
-                const virtualPath = this.metaDataToFolderStruct.renamingRule(metadata as any, '');
-                this.virtualFileSystem.addFile(virtualPath, filePath, metadata);
-            } catch (e) {
-                // Renaming rule may fail for incomplete metadata
-            }
-        }
     }
 
     markDiscovered(filePath: string): void {
@@ -274,10 +234,32 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 // STEP 1: Compute midhash256 (file identifier)
                 // Use WebDAV for file stats and hash computation
                 const fileStats = await webdav.stat(filePath);
-                if (!fileStats || !fileStats.exists) {
-                    console.error(`[WatchedFileProcessor] File not found via WebDAV: ${filePath}`);
+                if (!fileStats.exists) {
+                    // Generate specific error message based on error type
+                    const errorType = fileStats.error || 'unknown';
+                    let errorMsg: string;
+                    switch (errorType) {
+                        case 'timeout':
+                            errorMsg = 'WebDAV request timeout';
+                            break;
+                        case 'not_configured':
+                            errorMsg = 'WebDAV client not configured';
+                            break;
+                        case 'not_found':
+                            errorMsg = 'File not found';
+                            break;
+                        case 'network_error':
+                            errorMsg = 'WebDAV network error';
+                            break;
+                        case 'http_error':
+                            errorMsg = `WebDAV HTTP error (${fileStats.statusCode})`;
+                            break;
+                        default:
+                            errorMsg = 'WebDAV error';
+                    }
+                    console.error(`[WatchedFileProcessor] ${errorMsg}: ${filePath}`);
                     if (this.unifiedStateManager) {
-                        this.unifiedStateManager.completeLightProcessing(filePath, '', undefined, 'File not found');
+                        this.unifiedStateManager.completeLightProcessing(filePath, '', undefined, errorMsg);
                     }
                     return;
                 }
@@ -370,7 +352,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
 
     async finalize(): Promise<void> {
         try {
-            console.log(`Virtual filesystem update start`);
+            console.log(`Finalize processing start`);
             const start = performance.now();
             if (this.fileProcessor.getDatabase().size === 0) {
                 console.log(`No files to process`);
@@ -378,29 +360,21 @@ export class WatchedFileProcessor implements FileProcessorInterface {
             }
 
             // NOTE: Duplicate detection has been moved to meta-dup service
+            // NOTE: VFS building has been moved to meta-fuse service
 
-            let startTime = performance.now();
+            const startTime = performance.now();
             console.log(`Generating virtual structure for ${this.fileProcessor.getDatabase().size} files`);
-            const virtualStructure = this.metaDataToFolderStruct.generateVirtualStructure(this.fileProcessor.getDatabase());
+            this.metaDataToFolderStruct.generateVirtualStructure(this.fileProcessor.getDatabase());
             const virtualStructureTime = Math.ceil(performance.now() - startTime);
             console.log(`Virtual structure generation took ${virtualStructureTime}ms`);
             performanceMetrics.recordVirtualStructureGeneration(virtualStructureTime);
-
-            // Build VirtualFileSystem for FUSE/WebDAV API
-            startTime = performance.now();
-            this.virtualFileSystem.buildFromComputed(virtualStructure, this.fileProcessor.getDatabase());
-            const vfsBuildTime = Math.ceil(performance.now() - startTime);
-            console.log(`VirtualFileSystem build took ${vfsBuildTime}ms`);
-            performanceMetrics.recordVFSUpdate(vfsBuildTime);
-            const stats = this.virtualFileSystem.getStats();
-            console.log(`VirtualFileSystem: ${stats.fileCount} files (${stats.metaFileCount} .meta), ${stats.directoryCount} directories, ${(stats.totalSize / 1024 / 1024).toFixed(2)} MB`);
 
             if(this.jellyfinAPI.jellyApiAvailable()) {
                 await this.jellyfinAPI.refreshLibrary();
                 console.log(`Jellyfin refreshed`);
             }
 
-            console.log(`Virtual filesystem update took ${Math.ceil(performance.now() - start)}ms`);
+            console.log(`Finalize processing took ${Math.ceil(performance.now() - start)}ms`);
         } catch (error) {
             console.error(error);
         }
@@ -472,12 +446,12 @@ export class WatchedFileProcessor implements FileProcessorInterface {
         const elapsed = Math.ceil(performance.now() - startTime);
         console.log(`[Cleanup] Removed ${removedCount} stale entries in ${elapsed}ms`);
 
-        // If we removed files, rebuild VFS to update structure
+        // If we removed files, finalize processing and notify Stremio
         if (removedCount > 0) {
-            console.log('[Cleanup] Rebuilding VFS after cleanup...');
+            console.log('[Cleanup] Finalizing after cleanup...');
             await this.finalize();
 
-            // Notify Stremio addon to remove videos (incremental updates like FUSE)
+            // Notify Stremio addon to remove videos
             if (removedHashIds.length > 0) {
                 console.log(`[Cleanup] Notifying Stremio to remove ${removedHashIds.length} videos...`);
                 for (const hashId of removedHashIds) {
@@ -490,78 +464,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
     }
 
     /**
-     * Rebuild VirtualFileSystem from KV data
-     * This is called on startup to restore the VFS from persistent storage
-     *
-     * Fast-load strategy: Load all metadata from KV WITHOUT disk validation.
-     * Discovery will later validate file existence and clean up stale entries.
-     *
-     * Design Philosophy:
-     * - KV = distributed metadata archive (permanent record)
-     * - In-memory DB = current VFS state (only present files)
-     * - Discovery = source of truth (validates and cleans)
-     */
-    async rebuildVFSFromKV(): Promise<void> {
-        const kvClient = this.getKVClient();
-        if (!kvClient) {
-            console.warn('[VFS Rebuild] KV client not available, skipping VFS rebuild');
-            return;
-        }
-
-        try {
-            console.log('[VFS Rebuild] Starting fast-load from KV...');
-            const startTime = performance.now();
-
-            // Get all hash IDs from KV
-            const hashIds = await kvClient.getAllHashIds();
-            console.log(`[VFS Rebuild] Found ${hashIds.length} files in KV`);
-
-            if (hashIds.length === 0) {
-                console.log('[VFS Rebuild] No files in KV, VFS remains empty');
-                return;
-            }
-
-            // Batch fetch all metadata in parallel (no disk validation)
-            console.log('[VFS Rebuild] Fetching metadata in parallel...');
-            const metadataList = await Promise.all(
-                hashIds.map(async (hashId) => {
-                    try {
-                        return await kvClient.getMetadataFlat(hashId);
-                    } catch (error) {
-                        console.error(`[VFS Rebuild] Failed to load metadata for ${hashId}:`, error);
-                        return null;
-                    }
-                })
-            );
-
-            // Populate in-memory database without disk validation
-            let loadedCount = 0;
-            for (const metadata of metadataList) {
-                if (metadata && metadata.filePath) {
-                    // Mark as unverified - discovery will validate later
-                    (metadata as ExtendedHashMeta)._lastVerified = 0;
-                    this.fileProcessor.getDatabase().set(metadata.filePath, metadata);
-                    loadedCount++;
-                }
-            }
-
-            console.log(`[VFS Rebuild] Loaded ${loadedCount}/${hashIds.length} files into memory (unverified)`);
-
-            // Build VFS immediately - may contain stale entries until discovery validates
-            if (this.fileProcessor.getDatabase().size > 0) {
-                await this.finalize();
-                console.log(`[VFS Rebuild] VFS rebuilt in ${Math.ceil(performance.now() - startTime)}ms`);
-                console.log('[VFS Rebuild] Discovery will validate file existence in background');
-            } else {
-                console.log('[VFS Rebuild] No files loaded, VFS remains empty');
-            }
-        } catch (error) {
-            console.error('[VFS Rebuild] Error rebuilding VFS from KV:', error);
-        }
-    }
-
-    /**
-     * Notify Stremio addon to remove video (incremental update like FUSE)
+     * Notify Stremio addon to remove video
      */
     private async notifyStremioRemove(hashId: string): Promise<void> {
         try {

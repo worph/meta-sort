@@ -54,33 +54,6 @@ function Monitor() {
         return () => clearInterval(interval);
     }, [fetchData]);
 
-    const triggerScan = async () => {
-        try {
-            await fetch('/api/scan/trigger', { method: 'POST' });
-            fetchData();
-        } catch (err) {
-            console.error('Failed to trigger scan:', err);
-        }
-    };
-
-    const stopProcessing = async () => {
-        try {
-            await fetch('/api/processing/stop', { method: 'POST' });
-            fetchData();
-        } catch (err) {
-            console.error('Failed to stop processing:', err);
-        }
-    };
-
-    const startProcessing = async () => {
-        try {
-            await fetch('/api/processing/start', { method: 'POST' });
-            fetchData();
-        } catch (err) {
-            console.error('Failed to start processing:', err);
-        }
-    };
-
     const retryFile = async (filePath: string) => {
         try {
             await fetch('/api/processing/retry', {
@@ -100,25 +73,6 @@ function Monitor() {
             fetchData();
         } catch (err) {
             console.error('Failed to retry all files:', err);
-        }
-    };
-
-    const clearMetadata = async () => {
-        if (!window.confirm('Are you sure you want to clear all metadata? This will delete all file metadata and trigger a full rescan.')) {
-            return;
-        }
-        try {
-            const response = await fetch('/api/metadata/clear', { method: 'POST' });
-            const data = await response.json();
-            if (response.ok) {
-                alert(`Cleared ${data.deletedCount} files. Rescan triggered.`);
-            } else {
-                alert(`Failed to clear metadata: ${data.message}`);
-            }
-            fetchData();
-        } catch (err) {
-            console.error('Failed to clear metadata:', err);
-            alert('Failed to clear metadata');
         }
     };
 
@@ -193,23 +147,6 @@ function Monitor() {
         <div className="monitor-page">
             <div className="monitor-header">
                 <h1>Processing Monitor</h1>
-                <div className="header-actions">
-                    {status?.computed?.gateOpen === false ? (
-                        <button className="btn btn-success" onClick={startProcessing}>
-                            Start Processing
-                        </button>
-                    ) : (
-                        <button className="btn btn-danger" onClick={stopProcessing}>
-                            Stop Processing
-                        </button>
-                    )}
-                    <button className="btn btn-primary" onClick={triggerScan}>
-                        Trigger Scan
-                    </button>
-                    <button className="btn btn-warning" onClick={clearMetadata}>
-                        Clear Metadata
-                    </button>
-                </div>
             </div>
 
             {/* Pipeline Progress Bar - 6 Stage (including failed) */}
@@ -573,30 +510,6 @@ function Monitor() {
                 .monitor-header h1 {
                     font-size: 1.8rem;
                 }
-
-                .header-actions {
-                    display: flex;
-                    gap: 12px;
-                }
-
-                .btn-success {
-                    background: linear-gradient(135deg, #10b981, #059669);
-                    color: white;
-                }
-
-                .btn-success:hover {
-                    background: linear-gradient(135deg, #059669, #047857);
-                }
-
-                .btn-danger {
-                    background: linear-gradient(135deg, #ef4444, #dc2626);
-                    color: white;
-                }
-
-                .btn-danger:hover {
-                    background: linear-gradient(135deg, #dc2626, #b91c1c);
-                }
-
 
                 /* Pipeline Progress Bar */
                 .pipeline-section {

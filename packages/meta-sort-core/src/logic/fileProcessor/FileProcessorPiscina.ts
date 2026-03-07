@@ -161,8 +161,30 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
             }
 
             const stats = await webdav.stat(filePath);
-            if (!stats || !stats.exists) {
-                throw new Error(`File not found via WebDAV: ${filePath}`);
+            if (!stats.exists) {
+                // Generate specific error message based on error type
+                const errorType = stats.error || 'unknown';
+                let errorMsg: string;
+                switch (errorType) {
+                    case 'timeout':
+                        errorMsg = `WebDAV request timeout for: ${filePath}`;
+                        break;
+                    case 'not_configured':
+                        errorMsg = `WebDAV client not configured, cannot access: ${filePath}`;
+                        break;
+                    case 'not_found':
+                        errorMsg = `File not found via WebDAV: ${filePath}`;
+                        break;
+                    case 'network_error':
+                        errorMsg = `WebDAV network error for: ${filePath}`;
+                        break;
+                    case 'http_error':
+                        errorMsg = `WebDAV HTTP error (${stats.statusCode}) for: ${filePath}`;
+                        break;
+                    default:
+                        errorMsg = `WebDAV error for: ${filePath}`;
+                }
+                throw new Error(errorMsg);
             }
 
             // STEP 1: Check cache for midhash256 FIRST (avoids network I/O on unchanged files)
@@ -348,23 +370,46 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 this.unifiedStateManager.startLightProcessing(filePath);
             }
 
-            const stats = await webdav.stat(filePath);
-            if (!stats || !stats.exists) {
-                throw new Error(`File not found via WebDAV: ${filePath}`);
-            }
-
             // STEP 1: Use midhash256 from meta-core if provided, otherwise check cache/compute locally
             let midHash256: string | undefined;
 
             if (providedMidHash256) {
-                // midhash256 provided by meta-core - use directly (no file I/O needed)
+                // midhash256 provided by meta-core - use directly (no WebDAV I/O needed!)
+                // meta-core already verified the file exists when it computed the hash
                 midHash256 = providedMidHash256;
                 performanceMetrics.recordCacheHit('midhash256');
-
-                // Store in local cache for future lookups
-                this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
+                // Note: We skip cache storage here since we don't have file stats (size/mtime)
+                // This is fine because meta-core will provide the hash again on rescan
             } else {
-                // Fallback: Check cache or compute locally (legacy path)
+                // Fallback: Need to access file via WebDAV (legacy path without meta-core events)
+                const stats = await webdav.stat(filePath);
+                if (!stats.exists) {
+                    // Generate specific error message based on error type
+                    const errorType = stats.error || 'unknown';
+                    let errorMsg: string;
+                    switch (errorType) {
+                        case 'timeout':
+                            errorMsg = `WebDAV request timeout for: ${filePath}`;
+                            break;
+                        case 'not_configured':
+                            errorMsg = `WebDAV client not configured, cannot access: ${filePath}`;
+                            break;
+                        case 'not_found':
+                            errorMsg = `File not found via WebDAV: ${filePath}`;
+                            break;
+                        case 'network_error':
+                            errorMsg = `WebDAV network error for: ${filePath}`;
+                            break;
+                        case 'http_error':
+                            errorMsg = `WebDAV HTTP error (${stats.statusCode}) for: ${filePath}`;
+                            break;
+                        default:
+                            errorMsg = `WebDAV error for: ${filePath}`;
+                    }
+                    throw new Error(errorMsg);
+                }
+
+                // Check cache or compute locally
                 const indexLine = this.indexManager.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
 
                 if (indexLine && indexLine.cid_midhash256) {
@@ -475,10 +520,8 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 this.unifiedStateManager.startHashProcessing(filePath);
             }
 
-            const stats = await webdav.stat(filePath);
-            if (!stats || !stats.exists) {
-                throw new Error(`File not found via WebDAV: ${filePath}`);
-            }
+            // Note: We skip WebDAV stat here - file existence was verified during light phase
+            // If file was deleted, the container plugin will fail when accessing it
             const metadata = this.database.get(filePath);
             if (!metadata) {
                 throw new Error('Metadata not found - light processing may have failed');

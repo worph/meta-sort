@@ -822,7 +822,6 @@ gdrive: /files/gdrive rclone vfs-cache-mode=full 0 0
   "totalLightProcessing": 16,
   "totalHashProcessing": 8,
   "totalDone": 45000,
-  "totalFilesInVFS": 45150,
   "throughput": {
     "filesPerSecond": 34,
     "avgLightProcessingMs": 470,

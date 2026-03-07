@@ -7,7 +7,6 @@
 
 import { expect } from 'chai';
 import { UnifiedAPIServer } from './UnifiedAPIServer.js';
-import { VirtualFileSystem } from './VirtualFileSystem.js';
 import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateManager.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import type { FastifyInstance } from 'fastify';
@@ -240,12 +239,8 @@ describe('UnifiedAPIServer', function() {
         mockStateManager.addDone('/files/test/Test Movie.mp4');
         mockStateManager.addDiscovered('/files/test/pending.mp4');
 
-        // Create VFS (no params needed - uses defaults)
-        const vfs = new VirtualFileSystem();
-
         // Create server
         server = new UnifiedAPIServer(
-            vfs,
             { port: 3000, host: 'localhost', enableCors: true },
             mockStateManager as any,
             mockKV as any,
@@ -276,7 +271,6 @@ describe('UnifiedAPIServer', function() {
             expect(response.statusCode).to.equal(200);
             const body = JSON.parse(response.payload);
             expect(body.status).to.equal('ok');
-            expect(body.services).to.have.property('fuse');
             expect(body.services).to.have.property('metrics');
         });
 
@@ -416,97 +410,7 @@ describe('UnifiedAPIServer', function() {
     // NOTE: /api/scan/trigger has been removed from meta-sort (Architecture V3)
     // Scan is now handled by meta-core. Tests for scan trigger are in core.bats.
 
-    // =========================================================================
-    // FUSE API (Virtual Filesystem)
-    // =========================================================================
-
-    describe('FUSE API (/api/fuse/*)', function() {
-        it('GET /api/fuse/health returns ok', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/fuse/health'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body.status).to.equal('ok');
-        });
-
-        it('GET /api/fuse/stats returns VFS statistics', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/fuse/stats'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('fileCount');
-            expect(body).to.have.property('directoryCount');
-        });
-
-        it('POST /api/fuse/readdir returns directory contents', async function() {
-            const response = await app.inject({
-                method: 'POST',
-                url: '/api/fuse/readdir',
-                payload: { path: '/' }
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('entries');
-            expect(Array.isArray(body.entries)).to.be.true;
-        });
-
-        it('POST /api/fuse/exists checks path existence', async function() {
-            const response = await app.inject({
-                method: 'POST',
-                url: '/api/fuse/exists',
-                payload: { path: '/' }
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('exists');
-            expect(typeof body.exists).to.equal('boolean');
-        });
-
-        it('GET /api/fuse/tree returns full VFS tree', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/fuse/tree'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            // API returns tree structure directly (path, type, children)
-            expect(body).to.have.property('path');
-            expect(body).to.have.property('type');
-        });
-
-        it('GET /api/fuse/files returns all file paths', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/fuse/files'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('files');
-            expect(Array.isArray(body.files)).to.be.true;
-        });
-
-        it('GET /api/fuse/directories returns all directory paths', async function() {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/fuse/directories'
-            });
-
-            expect(response.statusCode).to.equal(200);
-            const body = JSON.parse(response.payload);
-            expect(body).to.have.property('directories');
-            expect(Array.isArray(body.directories)).to.be.true;
-        });
-    });
+    // NOTE: FUSE API (/api/fuse/*) has been moved to meta-fuse service.
 
     // =========================================================================
     // Plugins API (Plugins Page)

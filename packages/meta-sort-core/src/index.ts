@@ -65,15 +65,13 @@ const pipeline = new StreamingPipeline({
     fileProcessor: fileProcessor.fileProcessor,
     stateManager: fileProcessor.unifiedStateManager,
     kvClient: fileProcessor.getKVClient(),
-    virtualFileSystem: fileProcessor.getVirtualFileSystem(),
     metaDataToFolderStruct: fileProcessor.metaDataToFolderStruct
 });
 
 // Connect pipeline to fileProcessor for queue status monitoring
 fileProcessor.setPipeline(pipeline);
 
-// VFS and state manager are available immediately
-const vfs = fileProcessor.getVirtualFileSystem();
+// State manager is available immediately
 const unifiedStateManager = fileProcessor.getUnifiedStateManager();
 
 // API Server will be initialized after KV is ready (deferred to async init)
@@ -160,7 +158,7 @@ process.on('SIGINT', async () => {
 
         // Start Unified API Server AFTER KV is ready (so kvClient is available)
         const kvClient = fileProcessor.getKVClient();
-        apiServer = new UnifiedAPIServer(vfs, {
+        apiServer = new UnifiedAPIServer({
             port: config.FUSE_API_PORT,
             host: config.FUSE_API_HOST,
             enableCors: true,
@@ -247,11 +245,6 @@ process.on('SIGINT', async () => {
         // Connect StreamingPipeline to API server (for pause/resume control)
         apiServer.setStreamingPipeline(pipeline);
         console.log('[Startup] StreamingPipeline connected to API server');
-
-        // First, rebuild VFS from KV to restore state from previous runs
-        console.log('[Startup] Rebuilding VirtualFileSystem from KV...');
-        await fileProcessor.rebuildVFSFromKV();
-        console.log('[Startup] VFS rebuild completed');
 
         // Log cache performance summary
         const metrics = performanceMetrics.getMetrics();

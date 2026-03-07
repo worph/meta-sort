@@ -76,25 +76,34 @@ export function toWebdavUrl(filePath: string): string | null {
 }
 
 /**
+ * Error types for WebDAV operations
+ */
+export type WebdavErrorType = 'not_found' | 'timeout' | 'not_configured' | 'network_error' | 'http_error';
+
+/**
  * File stats returned from WebDAV HEAD request.
  */
 export interface WebdavFileStats {
     size: number;
     mtime: Date;
     exists: boolean;
+    /** Error type if the request failed */
+    error?: WebdavErrorType;
+    /** HTTP status code if applicable */
+    statusCode?: number;
 }
 
 /**
  * Get file stats via HTTP HEAD request to WebDAV.
  *
  * @param filePath - File path
- * @returns File stats or null on error
+ * @returns File stats with error information if failed
  */
-export async function stat(filePath: string): Promise<WebdavFileStats | null> {
+export async function stat(filePath: string): Promise<WebdavFileStats> {
     const url = toWebdavUrl(filePath);
     if (!url) {
         console.error('[webdav-client] Not configured, cannot stat file');
-        return null;
+        return { size: 0, mtime: new Date(0), exists: false, error: 'not_configured' };
     }
 
     try {
@@ -104,12 +113,12 @@ export async function stat(filePath: string): Promise<WebdavFileStats | null> {
         });
 
         if (response.status === 404) {
-            return { size: 0, mtime: new Date(0), exists: false };
+            return { size: 0, mtime: new Date(0), exists: false, error: 'not_found', statusCode: 404 };
         }
 
         if (!response.ok) {
             console.error(`[webdav-client] HEAD error for ${url}: ${response.status}`);
-            return null;
+            return { size: 0, mtime: new Date(0), exists: false, error: 'http_error', statusCode: response.status };
         }
 
         const contentLength = response.headers.get('Content-Length');
@@ -120,9 +129,20 @@ export async function stat(filePath: string): Promise<WebdavFileStats | null> {
             mtime: lastModified ? new Date(lastModified) : new Date(),
             exists: true
         };
-    } catch (error) {
+    } catch (error: any) {
+        // Distinguish timeout errors from other network errors
+        const isTimeout = error?.name === 'TimeoutError' ||
+                          error?.code === 'ABORT_ERR' ||
+                          error?.message?.includes('timeout') ||
+                          error?.message?.includes('aborted');
+
+        if (isTimeout) {
+            console.error(`[webdav-client] HEAD timeout for ${url}`);
+            return { size: 0, mtime: new Date(0), exists: false, error: 'timeout' };
+        }
+
         console.error(`[webdav-client] HEAD error for ${url}:`, error);
-        return null;
+        return { size: 0, mtime: new Date(0), exists: false, error: 'network_error' };
     }
 }
 
@@ -134,7 +154,7 @@ export async function stat(filePath: string): Promise<WebdavFileStats | null> {
  */
 export async function exists(filePath: string): Promise<boolean> {
     const stats = await stat(filePath);
-    return stats?.exists ?? false;
+    return stats.exists;
 }
 
 /**

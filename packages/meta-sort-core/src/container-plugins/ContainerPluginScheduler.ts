@@ -489,6 +489,9 @@ export class ContainerPluginScheduler extends EventEmitter {
 
     /**
      * Check if all tasks for a file are complete
+     *
+     * Note: Multiple files may share the same fileHash (e.g., duplicate files).
+     * When this happens, we need to emit file:complete for EACH unique filePath.
      */
     private checkFileCompletion(fileHash: string): void {
         const taskIds = this.fileTasks.get(fileHash);
@@ -497,7 +500,7 @@ export class ContainerPluginScheduler extends EventEmitter {
         }
 
         let allComplete = true;
-        let filePath: string | undefined;
+        const uniqueFilePaths = new Set<string>();
 
         for (const taskId of taskIds) {
             const task = this.pendingTasks.get(taskId);
@@ -505,7 +508,8 @@ export class ContainerPluginScheduler extends EventEmitter {
                 continue;
             }
 
-            filePath = task.filePath;
+            // Collect all unique filePaths that share this hash
+            uniqueFilePaths.add(task.filePath);
 
             if (
                 task.status !== 'completed' &&
@@ -517,7 +521,7 @@ export class ContainerPluginScheduler extends EventEmitter {
             }
         }
 
-        if (allComplete && filePath) {
+        if (allComplete && uniqueFilePaths.size > 0) {
             // Clean up task tracking
             for (const taskId of taskIds) {
                 this.pendingTasks.delete(taskId);
@@ -533,7 +537,10 @@ export class ContainerPluginScheduler extends EventEmitter {
                 }
             }
 
-            this.emit('file:complete', { fileHash, filePath });
+            // Emit file:complete for EACH unique filePath (handles duplicate files with same hash)
+            for (const filePath of uniqueFilePaths) {
+                this.emit('file:complete', { fileHash, filePath });
+            }
         }
     }
 

@@ -162,26 +162,13 @@ export class StreamingPipeline {
 
             await this.config.fileProcessor.processLightPhase(filePath, current, queueSize, midhash256);
 
-            // After light processing, add to VFS
+            // After light processing, dispatch to plugins and queue background tasks
             const metadata = this.config.fileProcessor.getDatabase().get(filePath);
             if (metadata && metadata.cid_midhash256) {
-                // Generate virtual path from metadata
-                const virtualPath = this.config.metaDataToFolderStruct.renamingRule(metadata as any, filePath);
-
-                if (virtualPath) {
-                    // Add to VFS immediately (file appears with permanent midhash256 ID)
-                    this.config.virtualFileSystem.addFile(virtualPath, filePath, metadata);
-
-                    // Notify Stremio addon to add video (incremental update like FUSE)
-                    if (metadata.cid_midhash256) {
-                        this.notifyStremioAdd(metadata.cid_midhash256).catch(err => {
-                            // Silent fail - Stremio addon may not be running
-                        });
-                    }
-                } else {
-                    // File cannot be added to VFS (e.g., unsupported type, missing title)
-                    console.log(`⚠ File skipped from VFS (no virtual path): ${filePath}`);
-                }
+                // Notify Stremio addon to add video
+                this.notifyStremioAdd(metadata.cid_midhash256).catch(err => {
+                    // Silent fail - Stremio addon may not be running
+                });
 
                 // Dispatch tasks to container plugins (fire and forget)
                 this.dispatchContainerPluginTasks(filePath, metadata.cid_midhash256, metadata);

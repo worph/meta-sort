@@ -59,12 +59,6 @@ export interface PerformanceMetricsData {
   // Per-plugin timing metrics
   pluginProcessingTimes: Record<string, PluginTimingStats>;
 
-  // VFS update metrics
-  totalVFSUpdates: number;
-  averageVFSUpdateTime: number;
-  lastVFSUpdateTime: number;
-  recentVFSUpdateTimes: MetricEntry[];
-
   // Duplicate detection metrics
   averageDuplicateDetectionTime: number;
   lastDuplicateDetectionTime: number;
@@ -120,12 +114,6 @@ export class PerformanceMetrics {
   private hashProcessingSum: number = 0;
   private hashProcessingMin: number = Infinity;
   private hashProcessingMax: number = 0;
-
-  // VFS update tracking - running statistics
-  private recentVFSUpdates: MetricEntry[] = [];
-  private totalVFSUpdates: number = 0;
-  private vfsUpdateSum: number = 0;
-  private lastVFSUpdateTime: number = 0;
 
   // Duplicate detection tracking - running statistics
   private totalDuplicatesFound: number = 0;
@@ -218,28 +206,6 @@ export class PerformanceMetrics {
     this.hashProcessingMin = Math.min(this.hashProcessingMin, timeMs);
     this.hashProcessingMax = Math.max(this.hashProcessingMax, timeMs);
     this.totalHashProcessed++;
-
-    this.lastActivityTime = Date.now();
-  }
-
-  /**
-   * Record a VFS update event
-   */
-  recordVFSUpdate(timeMs: number): void {
-    // Update running statistics
-    this.vfsUpdateSum += timeMs;
-    this.lastVFSUpdateTime = timeMs;
-    this.totalVFSUpdates++;
-
-    // Keep recent list for display only
-    this.recentVFSUpdates.push({
-      timestamp: Date.now(),
-      value: timeMs
-    });
-
-    if (this.recentVFSUpdates.length > this.maxRecentEntries) {
-      this.recentVFSUpdates.shift();
-    }
 
     this.lastActivityTime = Date.now();
   }
@@ -447,14 +413,6 @@ export class PerformanceMetrics {
         return acc;
       }, {} as Record<string, PluginTimingStats>),
 
-      // VFS update metrics - O(1) from running statistics
-      totalVFSUpdates: this.totalVFSUpdates,
-      averageVFSUpdateTime: this.totalVFSUpdates > 0
-        ? this.vfsUpdateSum / this.totalVFSUpdates
-        : 0,
-      lastVFSUpdateTime: this.lastVFSUpdateTime,
-      recentVFSUpdateTimes: this.recentVFSUpdates.slice(-10), // Last 10 updates
-
       // Duplicate detection metrics - O(1) from running statistics
       averageDuplicateDetectionTime: this.duplicateDetectionCount > 0
         ? this.duplicateDetectionSum / this.duplicateDetectionCount
@@ -540,12 +498,6 @@ export class PerformanceMetrics {
     this.hashProcessingSum = 0;
     this.hashProcessingMin = Infinity;
     this.hashProcessingMax = 0;
-
-    // Reset VFS update metrics
-    this.recentVFSUpdates = [];
-    this.totalVFSUpdates = 0;
-    this.vfsUpdateSum = 0;
-    this.lastVFSUpdateTime = 0;
 
     // Reset duplicate detection metrics
     this.totalDuplicatesFound = 0;

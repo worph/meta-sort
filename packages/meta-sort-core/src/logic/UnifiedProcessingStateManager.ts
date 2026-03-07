@@ -51,7 +51,6 @@ export interface UnifiedProcessingSnapshot {
   totalLightProcessing: number;
   totalHashProcessing: number;
   totalDone: number;
-  totalFilesInVFS: number;         // Total number of files accessible in the Virtual File System
 
   /** Files that completed validation but are waiting for fast queue */
   awaitingFastQueue: number;
@@ -217,11 +216,10 @@ export class UnifiedProcessingStateManager {
 
   /**
    * Get a snapshot of the current processing state
-   * @param vfsFileCount - Optional total number of files in the Virtual File System
    * @param fastQueueConcurrency - Number of fast queue workers
    * @param backgroundQueueConcurrency - Number of background queue workers
    */
-  getSnapshot(vfsFileCount: number = 0, fastQueueConcurrency?: number, backgroundQueueConcurrency?: number): UnifiedProcessingSnapshot {
+  getSnapshot(fastQueueConcurrency?: number, backgroundQueueConcurrency?: number): UnifiedProcessingSnapshot {
     // Limit returned arrays to prevent slow API responses with large queues
     const MAX_ITEMS_PER_STATE = 100;
 
@@ -269,7 +267,6 @@ export class UnifiedProcessingStateManager {
       totalLightProcessing: this.lightProcessing.size,
       totalHashProcessing: this.hashProcessing.size,
       totalDone: this.totalProcessedCount, // Total count of all processed files (not limited to history)
-      totalFilesInVFS: vfsFileCount, // Total number of files accessible in the Virtual File System
 
       // Files that completed validation but are waiting for fast queue (set by API layer from queue status)
       awaitingFastQueue: 0,

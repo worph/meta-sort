@@ -1,7 +1,6 @@
 import {FileAnalyzerInterface} from "../fileProcessor/FileAnalyzerInterface.js";
 import {UnifiedProcessingStateManager} from "../UnifiedProcessingStateManager.js";
 import type {IKVClient} from "../../kv/IKVClient.js";
-import {VirtualFileSystem} from "../../api/VirtualFileSystem.js";
 import {MetaDataToFolderStruct} from "../MetaDataToFolderStruct.js";
 import type {ContainerPluginScheduler} from "../../container-plugins/ContainerPluginScheduler.js";
 
@@ -52,11 +51,6 @@ export interface PipelineConfig {
      * Optional KV client for metadata storage
      */
     kvClient?: IKVClient;
-
-    /**
-     * Virtual filesystem (for instant file visibility)
-     */
-    virtualFileSystem: VirtualFileSystem;
 
     /**
      * Metadata to folder structure converter (for virtual path generation)

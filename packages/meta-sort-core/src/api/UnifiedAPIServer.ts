@@ -7,7 +7,6 @@
 
 import Fastify, { FastifyInstance } from 'fastify';
 import fastifyCors from '@fastify/cors';
-import { VirtualFileSystem } from './VirtualFileSystem.js';
 import { performanceMetrics } from '../metrics/PerformanceMetrics.js';
 import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateManager.js';
 import type { IKVClient } from '../kv/IKVClient.js';
@@ -32,7 +31,6 @@ export interface UnifiedAPIServerConfig {
 
 export class UnifiedAPIServer {
   private app: FastifyInstance;
-  private vfs: VirtualFileSystem;
   private unifiedStateManager: UnifiedProcessingStateManager | null = null;
   private kvClient: IKVClient | null = null;
   private kvManager: KVManager | null = null;
@@ -51,7 +49,6 @@ export class UnifiedAPIServer {
   private static TOTAL_SIZE_CACHE_TTL_MS = 30000; // 30 seconds
 
   constructor(
-    vfs: VirtualFileSystem,
     config: UnifiedAPIServerConfig = {},
     unifiedStateManager?: UnifiedProcessingStateManager,
     kvClient?: IKVClient,
@@ -62,7 +59,6 @@ export class UnifiedAPIServer {
     getPluginManager?: () => PluginManager | null,
     getTaskScheduler?: () => TaskScheduler | null
   ) {
-    this.vfs = vfs;
     this.unifiedStateManager = unifiedStateManager || null;
     this.kvClient = kvClient || null;
     this.kvManager = kvManager || null;
@@ -155,7 +151,6 @@ export class UnifiedAPIServer {
         status: 'ok',
         timestamp: new Date().toISOString(),
         services: {
-          fuse: 'ok',
           metrics: 'ok',
           unifiedProcessing: this.unifiedStateManager ? 'ok' : 'unavailable'
         }
@@ -175,9 +170,6 @@ export class UnifiedAPIServer {
         timestamp: new Date().toISOString()
       };
     });
-
-    // FUSE API routes (under /api/fuse)
-    this.setupFuseRoutes();
 
     // Metrics API routes (under /api/metrics)
     this.setupMetricsRoutes();
@@ -289,191 +281,6 @@ export class UnifiedAPIServer {
   // - GET    /api/mounts/rclone/remotes - List rclone remotes
 
   /**
-   * Setup FUSE API routes
-   */
-  private setupFuseRoutes(): void {
-    // Health check
-    this.app.get('/api/fuse/health', async (request, reply) => {
-      return {
-        status: 'ok',
-        timestamp: new Date().toISOString()
-      };
-    });
-
-    // VFS statistics
-    this.app.get('/api/fuse/stats', async (request, reply) => {
-      return this.vfs.getStats();
-    });
-
-    // Database statistics (KV)
-    this.app.get('/api/fuse/db-stats', async (request, reply) => {
-      if (!this.kvClient) {
-        return reply.status(503).send({
-          error: 'KV client not available'
-        });
-      }
-
-      try {
-        // Count files in database with /file/ prefix
-        const fileCount = await this.kvClient.countKeysWithPrefix('/file/');
-        return {
-          fileCount,
-          source: 'KV'
-        };
-      } catch (error: any) {
-        return reply.status(500).send({
-          error: 'Failed to retrieve database stats',
-          details: error.message
-        });
-      }
-    });
-
-    // List directory contents
-    this.app.post<{ Body: { path: string } }>('/api/fuse/readdir', async (request, reply) => {
-      const { path } = request.body;
-
-      if (typeof path !== 'string') {
-        return reply.status(400).send({
-          error: 'Missing or invalid "path" parameter'
-        });
-      }
-
-      const entries = this.vfs.readdir(path);
-
-      if (entries === null) {
-        return reply.status(404).send({ error: 'Directory not found' });
-      }
-
-      return { entries };
-    });
-
-    // Get file attributes
-    this.app.post<{ Body: { path: string } }>('/api/fuse/getattr', async (request, reply) => {
-      const { path } = request.body;
-
-      if (typeof path !== 'string') {
-        return reply.status(400).send({
-          error: 'Missing or invalid "path" parameter'
-        });
-      }
-
-      const attrs = this.vfs.getattr(path);
-
-      if (attrs === null) {
-        return reply.status(404).send({ error: 'Path not found' });
-      }
-
-      return attrs;
-    });
-
-    // Check if path exists
-    this.app.post<{ Body: { path: string } }>('/api/fuse/exists', async (request, reply) => {
-      const { path } = request.body;
-
-      if (typeof path !== 'string') {
-        return reply.status(400).send({
-          error: 'Missing or invalid "path" parameter'
-        });
-      }
-
-      const exists = this.vfs.exists(path);
-      return { exists };
-    });
-
-    // Read file
-    this.app.post<{ Body: { path: string } }>('/api/fuse/read', async (request, reply) => {
-      const { path } = request.body;
-
-      if (typeof path !== 'string') {
-        return reply.status(400).send({
-          error: 'Missing or invalid "path" parameter'
-        });
-      }
-
-      const result = this.vfs.read(path);
-
-      if (result === null) {
-        return reply.status(404).send({ error: 'File not found' });
-      }
-
-      // Convert Buffer to base64 for JSON serialization
-      const response: any = {
-        sourcePath: result.sourcePath,
-        size: result.size
-      };
-
-      if (result.content !== null) {
-        response.content = result.content.toString('base64');
-        response.contentEncoding = 'base64';
-      }
-
-      return response;
-    });
-
-    // Get file metadata
-    this.app.post<{ Body: { path: string } }>('/api/fuse/metadata', async (request, reply) => {
-      const { path } = request.body;
-
-      if (typeof path !== 'string') {
-        return reply.status(400).send({
-          error: 'Missing or invalid "path" parameter'
-        });
-      }
-
-      const metadata = this.vfs.getMetadata(path);
-
-      if (metadata === null) {
-        return reply.status(404).send({ error: 'Metadata not found' });
-      }
-
-      return metadata;
-    });
-
-    // Get complete VFS tree
-    this.app.get('/api/fuse/tree', async (request, reply) => {
-      return this.vfs.getTree();
-    });
-
-    // Get all file paths
-    this.app.get('/api/fuse/files', async (request, reply) => {
-      const files = this.vfs.getAllFiles();
-      return { files };
-    });
-
-    // Get all source file paths (for Stremio addon validation)
-    this.app.get('/api/fuse/source-paths', async (request, reply) => {
-      const files = this.vfs.getAllFiles();
-      const sourcePaths: string[] = [];
-
-      for (const file of files) {
-        // Skip virtual metadata files (.meta, .nfo, .xml)
-        if (file.endsWith('.meta') || file.endsWith('.nfo') || file.endsWith('.xml')) {
-          continue;
-        }
-
-        const result = this.vfs.read(file);
-        if (result && result.sourcePath) {
-          sourcePaths.push(result.sourcePath);
-        }
-      }
-
-      return { sourcePaths, count: sourcePaths.length };
-    });
-
-    // Get all directory paths
-    this.app.get('/api/fuse/directories', async (request, reply) => {
-      const directories = this.vfs.getAllDirectories();
-      return { directories };
-    });
-
-    // Refresh VFS
-    this.app.post('/api/fuse/refresh', async (request, reply) => {
-      await this.vfs.refresh();
-      return { status: 'ok' };
-    });
-  }
-
-  /**
    * Setup Metrics API routes
    */
   private setupMetricsRoutes(): void {
@@ -573,7 +380,7 @@ export class UnifiedAPIServer {
       // Get snapshot from state manager
       // Note: VFS-related features have been moved to meta-fuse
       // totalDone now uses state manager's count of fully processed files
-      const snapshot = this.unifiedStateManager!.getSnapshot(0, this.fastQueueConcurrency, this.backgroundQueueConcurrency) as ExtendedProcessingSnapshot;
+      const snapshot = this.unifiedStateManager!.getSnapshot(this.fastQueueConcurrency, this.backgroundQueueConcurrency) as ExtendedProcessingSnapshot;
 
       // Add queue status if available
       if (this.getQueueStatus) {
@@ -681,59 +488,6 @@ export class UnifiedAPIServer {
       return { status: 'ok', message: `${queued} files queued for retry` };
     });
 
-    // POST /api/processing/stop - Stop all processing
-    // Pauses pipeline queues and closes container plugin gate
-    // Running tasks will complete, but no new tasks will start
-    this.app.post('/api/processing/stop', async (request, reply) => {
-      // Pause the streaming pipeline (stops new files from being processed)
-      if (this.streamingPipeline) {
-        this.streamingPipeline.pause();
-      }
-
-      // Close the container plugin gate (stops new plugin tasks)
-      if (this.containerPluginScheduler) {
-        this.containerPluginScheduler.setGate(false);
-      }
-
-      const gateStatus = this.containerPluginScheduler?.getGateStatus() ?? null;
-      const pipelinePaused = this.streamingPipeline?.isPaused() ?? false;
-
-      console.log('[API] Processing stopped - pipeline paused, gate closed');
-
-      return {
-        status: 'ok',
-        message: 'Processing stopped - pipeline paused, gate closed',
-        gateStatus,
-        pipelinePaused
-      };
-    });
-
-    // POST /api/processing/start - Resume all processing
-    // Resumes pipeline queues and opens container plugin gate
-    this.app.post('/api/processing/start', async (request, reply) => {
-      // Resume the streaming pipeline
-      if (this.streamingPipeline) {
-        this.streamingPipeline.resume();
-      }
-
-      // Open the container plugin gate
-      if (this.containerPluginScheduler) {
-        this.containerPluginScheduler.setGate(true);
-      }
-
-      const gateStatus = this.containerPluginScheduler?.getGateStatus() ?? null;
-      const pipelinePaused = this.streamingPipeline?.isPaused() ?? false;
-
-      console.log('[API] Processing started - pipeline resumed, gate opened');
-
-      return {
-        status: 'ok',
-        message: 'Processing started - pipeline resumed, gate opened',
-        gateStatus,
-        pipelinePaused
-      };
-    });
-
     // POST /api/processing/wait-empty - Wait for queues to drain
     // Optional query param: timeout (ms, default 60000)
     this.app.post<{ Querystring: { timeout?: string } }>('/api/processing/wait-empty', async (request, reply) => {
@@ -809,56 +563,12 @@ export class UnifiedAPIServer {
   }
 
   /**
-   * Setup Metadata Clear API routes
-   * NOTE: /api/scan/trigger has been removed - use meta-core's endpoint instead
+   * Setup Scan-related API routes
+   * NOTE: /api/scan/trigger and /api/metadata/clear have been removed
+   * Use meta-core's endpoints instead
    */
   private setupScanRoutes(): void {
-    // Clear all metadata
-    // NOTE: To trigger a rescan after clearing, call meta-core's /api/scan/trigger endpoint
-    this.app.post('/api/metadata/clear', async (request, reply) => {
-      if (!this.kvClient) {
-        return reply.status(503).send({
-          status: 'error',
-          message: 'KV client not available'
-        });
-      }
-
-      try {
-        console.log('Clearing all metadata via API');
-
-        // Get all file keys and delete them using flat key deletion
-        const hashIds = await this.kvClient.getAllHashIds();
-        let deletedCount = 0;
-
-        for (const hashId of hashIds) {
-          try {
-            // Use deleteMetadataFlat to delete all flat keys for this file
-            await this.kvClient.deleteMetadataFlat(hashId);
-            deletedCount++;
-          } catch (err) {
-            console.warn(`Failed to delete metadata for ${hashId}:`, err);
-          }
-        }
-
-        // Note: deleteMetadataFlat already removes from file:__index__
-        // No need to delete the index separately
-
-        console.log(`Cleared ${deletedCount} file metadata entries`);
-
-        return {
-          status: 'ok',
-          message: `Cleared ${deletedCount} files. To rescan, call meta-core's /api/scan/trigger endpoint.`,
-          deletedCount
-        };
-      } catch (error: any) {
-        console.error('Error clearing metadata:', error);
-        return reply.status(500).send({
-          status: 'error',
-          message: 'Failed to clear metadata',
-          details: error.message
-        });
-      }
-    });
+    // No routes - all scan-related functionality moved to meta-core
   }
 
   /**
@@ -1785,7 +1495,6 @@ export class UnifiedAPIServer {
         host: this.config.host
       });
       console.log(`Unified API Server listening on http://${this.config.host}:${this.config.port}`);
-      console.log(`  - FUSE API: http://${this.config.host}:${this.config.port}/api/fuse/*`);
       console.log(`  - Metrics API: http://${this.config.host}:${this.config.port}/api/metrics`);
       if (this.kvClient) {
         console.log(`  - Metadata API: http://${this.config.host}:${this.config.port}/api/metadata/* (GET/PUT/DELETE/POST)`);
