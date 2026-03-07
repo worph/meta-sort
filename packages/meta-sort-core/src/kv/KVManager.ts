@@ -28,7 +28,7 @@
 
 import { hostname } from 'os';
 import { LeaderClient } from './LeaderClient.js';
-import { ServiceDiscovery } from './ServiceDiscovery.js';
+import { ServiceRegistration } from './ServiceRegistration.js';
 import { RedisKVClient } from './RedisClient.js';
 import type { IKVClient, LeaderLockInfo } from './IKVClient.js';
 import { configure as configureWebdav } from '../webdav/WebdavClient.js';
@@ -59,7 +59,7 @@ interface KVManagerConfig {
 export class KVManager {
     private config: KVManagerConfig;
     private leaderClient: LeaderClient | null = null;
-    private serviceDiscovery: ServiceDiscovery | null = null;
+    private serviceRegistration: ServiceRegistration | null = null;
     private kvClient: IKVClient | null = null;
     private isStarted = false;
     private isShuttingDown = false;
@@ -124,9 +124,10 @@ export class KVManager {
             console.log(`[KVManager] Connecting to Redis at ${leaderInfo.redisUrl}...`);
             this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
 
-            // Configure WebDAV client with leader's WebDAV URL
-            if (leaderInfo.webdavUrl) {
-                configureWebdav(leaderInfo.webdavUrl);
+            // Configure WebDAV client with leader's WebDAV URL (prefer internal for container-to-container)
+            const webdavUrl = leaderInfo.webdavUrlInternal ?? leaderInfo.webdavUrl;
+            if (webdavUrl) {
+                configureWebdav(webdavUrl);
             }
         } catch (error) {
             console.error('[KVManager] Failed to connect to leader:', error);
@@ -136,15 +137,15 @@ export class KVManager {
         // Start watching for leader changes
         this.leaderClient.startWatching();
 
-        // Initialize and start service discovery for registration and heartbeat
+        // Initialize and start service registration for heartbeat
         const apiUrl = this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`;
-        this.serviceDiscovery = new ServiceDiscovery({
+        this.serviceRegistration = new ServiceRegistration({
             metaCorePath: this.config.metaCorePath,
             serviceName: this.config.serviceName,
             version: '1.0.0',
             apiUrl
         });
-        await this.serviceDiscovery.start();
+        await this.serviceRegistration.start();
 
         this.isStarted = true;
         this.notifyReady();
@@ -170,9 +171,10 @@ export class KVManager {
             console.log(`[KVManager] Reconnecting to Redis at ${leaderInfo.redisUrl}...`);
             this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
 
-            // Reconfigure WebDAV client with new leader's WebDAV URL
-            if (leaderInfo.webdavUrl) {
-                configureWebdav(leaderInfo.webdavUrl);
+            // Reconfigure WebDAV client with new leader's WebDAV URL (prefer internal for container-to-container)
+            const webdavUrl = leaderInfo.webdavUrlInternal ?? leaderInfo.webdavUrl;
+            if (webdavUrl) {
+                configureWebdav(webdavUrl);
             }
 
             // Notify reconnect callbacks
@@ -209,10 +211,10 @@ export class KVManager {
             this.kvClient = null;
         }
 
-        // Service discovery stop (if it was started)
-        if (this.serviceDiscovery) {
-            await this.serviceDiscovery.stop();
-            this.serviceDiscovery = null;
+        // Service registration stop (if it was started)
+        if (this.serviceRegistration) {
+            await this.serviceRegistration.stop();
+            this.serviceRegistration = null;
         }
 
         this.isStarted = false;
@@ -308,17 +310,10 @@ export class KVManager {
     }
 
     /**
-     * Get service discovery instance
+     * Get service registration instance
      */
-    getServiceDiscovery(): ServiceDiscovery | null {
-        return this.serviceDiscovery;
-    }
-
-    /**
-     * Discover another service
-     */
-    async discoverService(name: string) {
-        return this.serviceDiscovery?.discoverService(name) ?? null;
+    getServiceRegistration(): ServiceRegistration | null {
+        return this.serviceRegistration;
     }
 
     /**

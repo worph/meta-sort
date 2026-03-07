@@ -201,10 +201,7 @@ export class UnifiedAPIServer {
       this.setupStatsRoutes();
     }
 
-    // Service discovery routes (under /api/services)
-    if (this.kvManager) {
-      this.setupServicesRoutes();
-    }
+    // Note: /api/services is handled by nginx proxy to meta-core (centralized service discovery)
 
     // Plugin management routes (under /api/plugins)
     // Always register - routes check for plugin manager at request time
@@ -861,61 +858,6 @@ export class UnifiedAPIServer {
           details: error.message
         });
       }
-    });
-  }
-
-  /**
-   * Setup Services Discovery API routes
-   * Returns list of discovered services for dashboard navigation
-   */
-  private setupServicesRoutes(): void {
-    if (!this.kvManager) {
-      return;
-    }
-
-    // Get discovered services (for inter-service navigation)
-    this.app.get('/api/services', async (request, reply) => {
-      const services: Array<{
-        name: string;
-        url: string;
-        api: string;
-        status: string;
-        role?: string;
-      }> = [];
-
-      try {
-        const serviceDiscovery = this.kvManager!.getServiceDiscovery();
-        if (serviceDiscovery) {
-          const allServices = await serviceDiscovery.discoverAllServices();
-
-          for (const svc of allServices) {
-            services.push({
-              name: svc.name || 'Unknown',
-              url: svc.baseUrl || '',
-              api: svc.baseUrl || '',
-              status: svc.status || 'unknown',
-              role: svc.role,
-            });
-          }
-        }
-      } catch (error: any) {
-        console.error('[Services API] Error discovering services:', error);
-      }
-
-      // Get leader info
-      const leaderInfo = this.kvManager!.getLeaderInfo();
-
-      return {
-        services,
-        current: 'meta-sort',
-        leader: leaderInfo ? {
-          hostname: leaderInfo.hostname,
-          baseUrl: leaderInfo.baseUrl,
-          apiUrl: leaderInfo.apiUrl,
-          redisUrl: leaderInfo.redisUrl,
-          webdavUrl: leaderInfo.webdavUrl,
-        } : null,
-      };
     });
   }
 

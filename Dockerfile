@@ -27,13 +27,17 @@ RUN npm run build
 # Stage 2: Build Backend using pnpm workspace
 FROM node:21-alpine AS backend-builder
 
-# Install pnpm
-RUN npm install -g pnpm
+# Install pnpm via corepack (version from package.json packageManager field)
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN npm install -g corepack@latest && corepack enable
 
 WORKDIR /build
 
 # Copy workspace configuration
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN corepack install
 
 # Copy all packages for the workspace
 COPY packages/shared/ ./packages/shared/
