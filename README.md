@@ -620,7 +620,7 @@ schema:
 ### Plugin Management
 
 Plugins can be enabled/disabled and configured via:
-- **Dashboard**: http://localhost:8180/ → Plugins tab
+- **Dashboard**: https://dev.localhost:8180/ → Plugins tab
 - **Config file**: `plugins.json` in cache directory
 
 ---
