@@ -193,7 +193,9 @@ export class UnifiedAPIServer {
       this.setupStatsRoutes();
     }
 
-    // Note: /api/services is handled by nginx proxy to meta-core (centralized service discovery)
+    // Service discovery — proxies to meta-core's /api/services using the
+    // LeaderClient to resolve meta-core's current URL dynamically.
+    this.setupServiceDiscoveryRoutes();
 
     // Plugin management routes (under /api/plugins)
     // Always register - routes check for plugin manager at request time
@@ -579,6 +581,37 @@ export class UnifiedAPIServer {
    */
   private setupScanRoutes(): void {
     // No routes - all scan-related functionality moved to meta-core
+  }
+
+  /**
+   * Service discovery — proxies to meta-core's /api/services, resolving the
+   * current leader's URL via LeaderClient (no hardcoded hostname).
+   */
+  private setupServiceDiscoveryRoutes(): void {
+    this.app.get('/api/services', async (_request, reply) => {
+      try {
+        const leaderClient = this.kvManager?.getLeaderClient();
+        if (!leaderClient) {
+          return reply.status(503).send({ error: 'KVManager not initialized' });
+        }
+        const apiUrl = await leaderClient.getApiUrl();
+        if (!apiUrl) {
+          return reply.status(503).send({ error: 'Leader not available yet' });
+        }
+        const response = await fetch(`${apiUrl}/api/services`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) {
+          return reply.status(response.status).send({
+            error: `Upstream ${apiUrl} returned ${response.status}`,
+          });
+        }
+        const body = await response.json();
+        return reply.send(body);
+      } catch (err) {
+        return reply.status(502).send({ error: getErrorMessage(err) });
+      }
+    });
   }
 
   /**
