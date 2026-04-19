@@ -12,5 +12,6 @@
     "test": "pnpm --filter @meta-sort/core test",
     "lint": "pnpm -r lint"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "packageManager": "pnpm@10.33.0+sha512.EFaLtKavtYyes2MNqQzJUWQXq+vT+rvmc58K55VyjaFJHp21pUTHatjrdXD1xLs9bGN7LLQb/c20f6gjyGSTGQ=="
 }
