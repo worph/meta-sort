@@ -21,6 +21,7 @@ import type { TaskQueueType } from '../plugin-engine/types.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import { type ExtendedContainerTask } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
+import { FileSlotGate } from './FileSlotGate.js';
 
 /**
  * Scheduler events
@@ -56,6 +57,18 @@ export interface GateStatus {
 }
 
 /**
+ * Per-file holder snapshot exposed via getQueueStatus for the dashboard.
+ * Lets operators see which 16 files are tying up cache slots and what plugin
+ * each file is currently waiting on (the long-pole per file).
+ */
+export interface CacheSlotHolder {
+    fileHash: string;
+    filePath?: string;
+    currentPlugin?: string;
+    tasksRemaining: number;
+}
+
+/**
  * Container Plugin Scheduler
  */
 export class ContainerPluginScheduler extends EventEmitter {
@@ -73,11 +86,30 @@ export class ContainerPluginScheduler extends EventEmitter {
     private kvClient: IKVClient | null = null;
     private isAcceptingNewTasks: boolean = true; // Gate control for safe mount/unmount
 
+    // File-level cache slots — see FileSlotGate.ts. Caps the number of files
+    // whose bytes are concurrently being touched in each phase, so the WebDAV
+    // cache only has to hold N files at a time regardless of plugin fan-out.
+    private lightFileGate: FileSlotGate;
+    private bgFileGate: FileSlotGate;
+    // Per-(file, phase) outstanding task counter — drives slot release.
+    private lightTasksPerFile: Map<string, number> = new Map();
+    private bgTasksPerFile: Map<string, number> = new Map();
+    // Tasks staged while waiting for a slot. Once the gate grants the file a
+    // slot we flush the buffered tasks into the underlying PQueue.
+    private lightBufferedTasks: Map<string, ContainerTask[]> = new Map();
+    private bgBufferedTasks: Map<string, ContainerTask[]> = new Map();
+    // Currently-dispatched plugin per file in each phase — used by the
+    // dashboard to show "this file is currently waiting on plugin X".
+    private lightCurrentPlugin: Map<string, string> = new Map();
+    private bgCurrentPlugin: Map<string, string> = new Map();
+
     constructor(
         containerManager: ContainerManager,
         options?: {
             fastConcurrency?: number;
             backgroundConcurrency?: number;
+            lightFileSlots?: number;
+            bgFileSlots?: number;
             callbackUrl?: string;
             metaCoreUrl?: string;
             defaultTimeout?: number;
@@ -97,6 +129,9 @@ export class ContainerPluginScheduler extends EventEmitter {
             concurrency: options?.backgroundConcurrency ?? config.FAST_QUEUE_CONCURRENCY,
             autoStart: false,
         });
+
+        this.lightFileGate = new FileSlotGate(options?.lightFileSlots ?? config.FILE_LIGHT_SLOTS);
+        this.bgFileGate = new FileSlotGate(options?.bgFileSlots ?? config.FILE_BG_SLOTS);
 
         // When fast queue becomes idle, start background queue
         this.fastQueue.on('idle', () => {
@@ -246,6 +281,17 @@ export class ContainerPluginScheduler extends EventEmitter {
     /**
      * Enqueue a task for execution
      * Returns false if the gate is closed and the task was rejected
+     *
+     * Tasks pass through the per-phase FileSlotGate before reaching PQueue:
+     *   - If the file already holds a slot in this phase, the task goes
+     *     straight to PQueue.
+     *   - Otherwise the task is buffered, and the file's first task triggers
+     *     a slot acquire. When the slot is granted, all buffered tasks for
+     *     that file are flushed into PQueue.
+     *
+     * This caps concurrent files per phase (and therefore concurrent file
+     * fetches against CORN/SMB) at the gate's capacity, regardless of how
+     * many plugin tasks each file fans out to.
      */
     enqueueTask(task: ContainerTask): boolean {
         if (!this.isAcceptingNewTasks) {
@@ -262,18 +308,88 @@ export class ContainerPluginScheduler extends EventEmitter {
             return false;
         }
 
-        const queue = task.queue === 'background' ? this.backgroundQueue : this.fastQueue;
-
         // If adding to fast queue, pause background queue (fast takes priority)
         if (task.queue === 'fast' && !this.backgroundQueue.isPaused) {
             console.log('[ContainerScheduler] Fast task added, pausing background queue');
             this.backgroundQueue.pause();
         }
 
-        queue.add(async () => {
-            await this.executeTask(task);
+        const counterMap = task.queue === 'fast' ? this.lightTasksPerFile : this.bgTasksPerFile;
+        const bufferMap = task.queue === 'fast' ? this.lightBufferedTasks : this.bgBufferedTasks;
+        const gate = task.queue === 'fast' ? this.lightFileGate : this.bgFileGate;
+
+        // Increment the per-file counter for this phase eagerly. Decrement
+        // happens in the executeTask finally clause.
+        counterMap.set(task.fileHash, (counterMap.get(task.fileHash) ?? 0) + 1);
+
+        if (gate.holds(task.fileHash)) {
+            // File already has a slot — dispatch immediately.
+            this.dispatchToPQueue(task);
+            return true;
+        }
+
+        // File doesn't hold a slot. Buffer the task. If this is the first
+        // buffered task for the file, trigger gate.acquire and flush on grant.
+        const existingBuffer = bufferMap.get(task.fileHash);
+        if (existingBuffer) {
+            existingBuffer.push(task);
+            return true;
+        }
+
+        bufferMap.set(task.fileHash, [task]);
+        gate.acquire(task.fileHash).then(() => {
+            const buffered = bufferMap.get(task.fileHash) ?? [];
+            bufferMap.delete(task.fileHash);
+            for (const t of buffered) {
+                this.dispatchToPQueue(t);
+            }
+            // Edge case: if every buffered task got cancelled by clear() before
+            // the slot was granted, release immediately so the slot doesn't
+            // leak.
+            if (buffered.length === 0 && (counterMap.get(task.fileHash) ?? 0) === 0) {
+                gate.release(task.fileHash);
+            }
         });
         return true;
+    }
+
+    /**
+     * Dispatch a task into the underlying PQueue and release its file's gate
+     * slot when the file's last task in that phase finishes.
+     */
+    private dispatchToPQueue(task: ContainerTask): void {
+        const queue = task.queue === 'background' ? this.backgroundQueue : this.fastQueue;
+        queue.add(async () => {
+            try {
+                await this.executeTask(task);
+            } finally {
+                this.onTaskFinished(task);
+            }
+        });
+    }
+
+    /**
+     * Bookkeeping after a task leaves PQueue (success, failure, or thrown).
+     * Decrements the per-(file, phase) task counter and releases the gate
+     * slot when the counter hits zero.
+     */
+    private onTaskFinished(task: ContainerTask): void {
+        const counterMap = task.queue === 'fast' ? this.lightTasksPerFile : this.bgTasksPerFile;
+        const currentMap = task.queue === 'fast' ? this.lightCurrentPlugin : this.bgCurrentPlugin;
+        const gate = task.queue === 'fast' ? this.lightFileGate : this.bgFileGate;
+
+        const remaining = (counterMap.get(task.fileHash) ?? 1) - 1;
+        if (remaining <= 0) {
+            counterMap.delete(task.fileHash);
+            currentMap.delete(task.fileHash);
+            gate.release(task.fileHash);
+        } else {
+            counterMap.set(task.fileHash, remaining);
+            // Clear current-plugin only if it points at this completed task.
+            if (currentMap.get(task.fileHash) === task.pluginId) {
+                currentMap.delete(task.fileHash);
+            }
+        }
     }
 
     /**
@@ -313,6 +429,11 @@ export class ContainerPluginScheduler extends EventEmitter {
         task.status = 'dispatched';
         task.dispatchedAt = Date.now();
         task.instanceName = instance.containerName;
+
+        // Record which plugin is currently running for this file (per phase)
+        // so the dashboard can show the long-pole plugin per held cache slot.
+        const currentMap = task.queue === 'fast' ? this.lightCurrentPlugin : this.bgCurrentPlugin;
+        currentMap.set(task.fileHash, task.pluginId);
 
         this.emit('task:dispatched', { task });
 
@@ -581,6 +702,16 @@ export class ContainerPluginScheduler extends EventEmitter {
             backgroundRunning: number; // unique files with background tasks running
             backgroundWaiting: number; // unique files with background tasks waiting
         };
+        // Per-phase cache-slot view — bounded by FileSlotGate. This is the
+        // metric operators actually care about: how many distinct files are
+        // tying up the WebDAV cache right now, and which plugin is the
+        // long-pole on each. `paused` reflects the underlying PQueue state so
+        // the UI can distinguish "16 files reserved but bg PQueue paused"
+        // from "16 files actively dispatching".
+        cacheSlots: {
+            fast: { capacity: number; inUse: number; waiting: number; paused: boolean; holders: CacheSlotHolder[] };
+            background: { capacity: number; inUse: number; waiting: number; paused: boolean; holders: CacheSlotHolder[] };
+        };
     } {
         // Count pending callbacks by queue type
         // These are tasks dispatched to containers awaiting completion - the real "running" count
@@ -639,6 +770,56 @@ export class ContainerPluginScheduler extends EventEmitter {
                 backgroundRunning: backgroundRunningFiles.size,
                 backgroundWaiting: backgroundWaitingFiles.size,
             },
+            cacheSlots: {
+                fast: this.snapshotCacheSlot('fast'),
+                background: this.snapshotCacheSlot('background'),
+            },
+        };
+    }
+
+    /**
+     * Build the per-phase cache-slot snapshot for the queue status payload.
+     * `currentPlugin` is the plugin currently dispatched against the file
+     * (the long-pole) — falls back to undefined if no task is mid-dispatch.
+     * `tasksRemaining` is the count of light/bg tasks still outstanding for
+     * the file in this phase, which is what holds the slot open.
+     */
+    private snapshotCacheSlot(
+        phase: TaskQueueType
+    ): { capacity: number; inUse: number; waiting: number; paused: boolean; holders: CacheSlotHolder[] } {
+        const gate = phase === 'fast' ? this.lightFileGate : this.bgFileGate;
+        const counterMap = phase === 'fast' ? this.lightTasksPerFile : this.bgTasksPerFile;
+        const currentMap = phase === 'fast' ? this.lightCurrentPlugin : this.bgCurrentPlugin;
+        const queue = phase === 'fast' ? this.fastQueue : this.backgroundQueue;
+
+        const holders: CacheSlotHolder[] = gate.getHolders().map((fileHash) => {
+            // Find any task for this file in this phase to recover filePath
+            // (one filePath is enough for the UI; duplicates collapse).
+            let filePath: string | undefined;
+            const taskIds = this.fileTasks.get(fileHash);
+            if (taskIds) {
+                for (const tid of taskIds) {
+                    const t = this.pendingTasks.get(tid);
+                    if (t && t.queue === phase) {
+                        filePath = t.filePath;
+                        break;
+                    }
+                }
+            }
+            return {
+                fileHash,
+                filePath,
+                currentPlugin: currentMap.get(fileHash),
+                tasksRemaining: counterMap.get(fileHash) ?? 0,
+            };
+        });
+
+        return {
+            capacity: gate.capacity,
+            inUse: gate.inUse(),
+            waiting: gate.waiting(),
+            paused: queue.isPaused,
+            holders,
         };
     }
 
@@ -751,6 +932,22 @@ export class ContainerPluginScheduler extends EventEmitter {
         this.fileTasks.clear();
         this.fileCompletedPlugins.clear();
         this.dependencyWaiters.clear();
+
+        // Drop file-slot-gate state. Tasks that were buffered or holding
+        // slots are no longer interesting once we've cleared the queues; a
+        // fresh scheduler state implies fresh gate state.
+        this.lightTasksPerFile.clear();
+        this.bgTasksPerFile.clear();
+        this.lightBufferedTasks.clear();
+        this.bgBufferedTasks.clear();
+        this.lightCurrentPlugin.clear();
+        this.bgCurrentPlugin.clear();
+        for (const fileHash of this.lightFileGate.getHolders()) {
+            this.lightFileGate.release(fileHash);
+        }
+        for (const fileHash of this.bgFileGate.getHolders()) {
+            this.bgFileGate.release(fileHash);
+        }
     }
 
     /**

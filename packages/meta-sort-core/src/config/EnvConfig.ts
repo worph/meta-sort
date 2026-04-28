@@ -69,6 +69,18 @@ interface EnvConfig {
     /** Concurrency for fast plugin queue. Default: 32 */
     FAST_QUEUE_CONCURRENCY: number;
 
+    /**
+     * Maximum number of files concurrently in the light (fast-queue) phase.
+     * Caps fan-out so the underlying file cache (WebDAV/nginx) only has to
+     * hold N files at a time. Default: 16.
+     */
+    FILE_LIGHT_SLOTS: number;
+
+    /**
+     * Maximum number of files concurrently in the background phase. Default: 16.
+     */
+    FILE_BG_SLOTS: number;
+
     // ========================================================================
     // Container Plugins Configuration
     // All plugins run as Docker containers for isolation and flexibility
@@ -139,6 +151,8 @@ export const config: EnvConfig = {
 
     // TaskScheduler Configuration
     FAST_QUEUE_CONCURRENCY: parseInt(process.env.FAST_QUEUE_CONCURRENCY || "32", 10),
+    FILE_LIGHT_SLOTS: parseInt(process.env.FILE_LIGHT_SLOTS || "16", 10),
+    FILE_BG_SLOTS: parseInt(process.env.FILE_BG_SLOTS || "16", 10),
 
     // Container Plugins Configuration
     CONTAINER_PLUGINS_CONFIG: process.env.CONTAINER_PLUGINS_CONFIG || '/app/plugins.yml',

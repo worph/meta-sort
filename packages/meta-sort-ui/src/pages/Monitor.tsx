@@ -5,7 +5,8 @@ import {
     RedisStats,
     QueueItem,
     HashTimingStats,
-    FailedFile
+    FailedFile,
+    CacheSlotPhase
 } from '../types';
 import {
     formatMs,
@@ -13,6 +14,43 @@ import {
     formatBytes,
     getFilename
 } from '../utils/format';
+
+/**
+ * Renders a single phase of the file-cache-slot view: capacity bar, count of
+ * waiting files, and a list of currently-held files showing which plugin
+ * each is currently waiting on. The plugin column is the long-pole — it tells
+ * operators which plugin is the per-file bottleneck.
+ */
+function CacheSlotPanel({ label, phase }: { label: string; phase: CacheSlotPhase }) {
+    const fillPct = Math.min(100, (phase.inUse / Math.max(1, phase.capacity)) * 100);
+    return (
+        <div style={{ marginTop: '0.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <strong>{label}</strong>
+                <span style={{ color: '#9ca3af', fontSize: '0.85rem' }}>
+                    {phase.inUse}/{phase.capacity} files
+                    {phase.waiting > 0 ? ` • ${phase.waiting} waiting for slot` : ''}
+                </span>
+            </div>
+            <div style={{ height: '6px', background: '#0f3460', borderRadius: '3px', overflow: 'hidden', margin: '0.25rem 0 0.5rem' }}>
+                <div style={{ width: `${fillPct}%`, height: '100%', background: '#4ade80', transition: 'width 0.5s linear' }} />
+            </div>
+            {phase.holders.length > 0 && (
+                <div style={{ fontSize: '0.78rem', color: '#cbd5e1', maxHeight: '160px', overflow: 'auto' }}>
+                    {phase.holders.map((h) => (
+                        <div key={h.fileHash} style={{ display: 'flex', gap: '0.5rem', padding: '2px 0' }}>
+                            <span style={{ color: '#facc15', minWidth: '8rem' }}>{h.currentPlugin ?? '—'}</span>
+                            <span style={{ color: '#94a3b8', minWidth: '4rem' }}>×{h.tasksRemaining}</span>
+                            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.filePath ?? h.fileHash}>
+                                {h.filePath ? getFilename(h.filePath) : h.fileHash}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
 
 function Monitor() {
     const [status, setStatus] = useState<ProcessingStatus | null>(null);
@@ -107,31 +145,50 @@ function Monitor() {
     // Get queue statistics for display
     // StreamingPipeline stages: validation → lightProcessing → hashProcessing
     // UI mapping: Validation → Fast Queue → Background Queue
+    //
+    // Fast/Background "Running/Max" represents file-cache slot occupancy
+    // (cacheSlots.inUse / capacity), not raw task throughput. This matches the
+    // operator mental model: "how many files are currently tying up the WebDAV
+    // cache?" The task-callback count was misleading because dependency-wait
+    // and per-plugin HTTP queueing made it under-report by ~5×.
     const getQueueStats = () => {
         const computed = status?.computed;
+        const cacheSlots = status?.queueStatus?.cacheSlots;
         const fastQueueConcurrency = status?.fastQueueConcurrency || 16;
         const backgroundQueueConcurrency = status?.backgroundQueueConcurrency || 8;
 
         return {
-            // Stage 1: Validation (quick extension checks)
-            // Concurrency: 2x fast queue workers
+            // Stage 1: Validation (quick extension checks). Still task-level
+            // — pre-process is a lightweight midhash256 scan, no cache impact.
             preProcess: {
                 running: computed?.preProcessRunning || 0,
                 pending: computed?.preProcessPending || 0,
                 max: fastQueueConcurrency * 2,
                 paused: computed?.preProcessPaused || false
             },
-            // Stage 2: Fast Queue (midhash256 + FFmpeg + plugins)
-            // Concurrency: fastQueueConcurrency workers
-            fast: {
+            // Stage 2: Fast Queue — files holding a light cache slot.
+            // running = files in cache, pending = files waiting for a slot.
+            // paused comes from the cacheSlots payload (true ContainerPluginScheduler
+            // PQueue state) — the legacy `computed.fastQueuePaused` field is sourced
+            // from a different StreamingPipeline queue and is unreliable here.
+            fast: cacheSlots ? {
+                running: cacheSlots.fast.inUse,
+                pending: cacheSlots.fast.waiting,
+                max: cacheSlots.fast.capacity,
+                paused: cacheSlots.fast.paused
+            } : {
                 running: computed?.fastQueueRunning || 0,
                 pending: computed?.fastQueuePending || 0,
                 max: fastQueueConcurrency,
                 paused: computed?.fastQueuePaused || false
             },
-            // Stage 3: Background Queue (SHA-256 full file hash)
-            // Concurrency: backgroundQueueConcurrency workers
-            background: {
+            // Stage 3: Background Queue — files holding a bg cache slot.
+            background: cacheSlots ? {
+                running: cacheSlots.background.inUse,
+                pending: cacheSlots.background.waiting,
+                max: cacheSlots.background.capacity,
+                paused: cacheSlots.background.paused
+            } : {
                 running: computed?.backgroundQueueRunning || 0,
                 pending: computed?.backgroundQueuePending || 0,
                 max: backgroundQueueConcurrency,
@@ -165,9 +222,9 @@ function Monitor() {
                     {showPipelineHelp && (
                         <div className="pipeline-help">
                             <div className="help-item"><span className="help-dot discovered"></span><strong>Discovered:</strong> Files found on disk, waiting to be processed.</div>
-                            <div className="help-item"><span className="help-dot fast"></span><strong>Fast Queue:</strong> Files being processed for quick metadata extraction (hash, ffmpeg, etc.).</div>
+                            <div className="help-item"><span className="help-dot fast"></span><strong>Fast Queue:</strong> Files holding a light cache slot. The badge shows slots-in-use over the gate capacity (e.g. 16/16). Pending = files waiting for a slot to free.</div>
                             <div className="help-item"><span className="help-dot awaiting-background"></span><strong>Awaiting BG:</strong> Files done with fast processing, queued for slower tasks.</div>
-                            <div className="help-item"><span className="help-dot background"></span><strong>Background:</strong> Files running slow tasks like full file hashing or TMDB lookups.</div>
+                            <div className="help-item"><span className="help-dot background"></span><strong>Background:</strong> Files holding a background cache slot (full-hash, TMDB, etc.). Same slot-occupancy semantics as Fast Queue.</div>
                             <div className="help-item"><span className="help-dot done"></span><strong>Complete:</strong> Files fully processed and available in the virtual filesystem.</div>
                             <div className="help-item"><span className="help-dot failed"></span><strong>Failed:</strong> Files that encountered errors during processing.</div>
                         </div>
@@ -298,6 +355,18 @@ function Monitor() {
                             </div>
                         </div>
                     </div>
+                </div>
+            )}
+
+            {status?.queueStatus?.cacheSlots && (
+                <div className="card cache-slot-section" style={{ marginTop: '1rem' }}>
+                    <h2>File cache slots</h2>
+                    <p style={{ color: '#888', fontSize: '0.85rem', marginTop: '-0.5rem' }}>
+                        Number of distinct files concurrently held by the WebDAV cache per phase. Caps how
+                        many file fetches CORN/SMB sees at once, regardless of plugin fan-out.
+                    </p>
+                    <CacheSlotPanel label="Light (fast queue)" phase={status.queueStatus.cacheSlots.fast} />
+                    <CacheSlotPanel label="Background" phase={status.queueStatus.cacheSlots.background} />
                 </div>
             )}
 

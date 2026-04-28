@@ -584,6 +584,16 @@ export class TaskScheduler extends EventEmitter {
         return [];
     }
 
+    /**
+     * Pass-through to ContainerPluginScheduler.getQueueStatus so callers like
+     * WatchedFileProcessor can surface the file-cache-slot view (capacity,
+     * holders, current plugin per file) without reaching past the scheduler
+     * boundary themselves.
+     */
+    getContainerQueueStatus(): ReturnType<ContainerPluginScheduler['getQueueStatus']> | null {
+        return this.containerPluginScheduler?.getQueueStatus() ?? null;
+    }
+
     // =========================================================================
     // Shutdown
     // =========================================================================

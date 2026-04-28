@@ -106,7 +106,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
             // Map StreamingPipeline queues to the 3-queue architecture UI expects
             // PQueue: .pending = currently running, .size = waiting in queue
             // API expects: .pending = running, .size = waiting
-            const result = {
+            const result: any = {
                 preProcessQueue: {
                     // validation = pre-process (quick extension checks)
                     size: queues.validation.size, // waiting in queue
@@ -130,6 +130,15 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 // File-level counts (what users care about)
                 files: queues.files
             };
+
+            // Layer in the per-file cache-slot view from the ContainerPluginScheduler
+            // when available — this is the metric that reflects WebDAV/cache load
+            // (number of distinct files concurrently being touched), not just task
+            // throughput. Older deployments without container plugins simply omit it.
+            const containerStatus = this.taskScheduler?.getContainerQueueStatus?.() ?? null;
+            if (containerStatus?.cacheSlots) {
+                result.cacheSlots = containerStatus.cacheSlots;
+            }
             return result;
         }
 

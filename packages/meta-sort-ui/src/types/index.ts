@@ -75,6 +75,29 @@ export interface TaskSchedulerQueueStatus {
     preProcessQueue?: TaskQueueStatus;
     fastQueue?: TaskQueueStatus;
     backgroundQueue?: TaskQueueStatus;
+    cacheSlots?: CacheSlotsStatus;
+}
+
+export interface CacheSlotHolder {
+    fileHash: string;
+    filePath?: string;
+    currentPlugin?: string;
+    tasksRemaining: number;
+}
+
+export interface CacheSlotPhase {
+    capacity: number;
+    inUse: number;
+    waiting: number;
+    /** True when the underlying PQueue is paused — bg phase is paused while
+     * fast has work, so its slots can be "reserved" without active dispatch. */
+    paused: boolean;
+    holders: CacheSlotHolder[];
+}
+
+export interface CacheSlotsStatus {
+    fast: CacheSlotPhase;
+    background: CacheSlotPhase;
 }
 
 export interface ProcessingStatus {
