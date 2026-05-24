@@ -104,7 +104,7 @@ process.on('SIGINT', async () => {
     // Stop File Event Consumer if running
     if (fileEventConsumer) {
         console.log('[Shutdown] Stopping File Event Consumer...');
-        fileEventConsumer.stop();
+        await fileEventConsumer.stop();
     }
 
     // Stop Container Manager if running
@@ -256,21 +256,21 @@ process.on('SIGINT', async () => {
             console.log(`[Cache] midhash256 cache: ${hits} hits, ${misses} misses (${hitRate}% hit rate)`);
         }
 
-        // Connect to meta-core for file events via Redis Stream
-        // KV client must be available
-        if (!kvClient) {
-            console.error('[Startup] ERROR: KV client not available. Cannot consume file events.');
-            console.error('[Startup] Make sure meta-core is running and Redis is accessible.');
+        // Connect to meta-core for file events via SSE
+        const leaderInfoForSSE = kvManager?.getLeaderInfo();
+        const metaCoreApiUrl = leaderInfoForSSE?.apiUrl;
+        if (!metaCoreApiUrl) {
+            console.error('[Startup] ERROR: meta-core apiUrl not available from leader info. Cannot consume file events.');
             process.exit(1);
         }
-        console.log('[Startup] Starting File Event Consumer (Redis Stream)...');
+        console.log(`[Startup] Starting File Event Consumer (SSE → ${metaCoreApiUrl}/api/events/files)...`);
         fileEventConsumer = new FileEventConsumer({
-            kvClient: kvClient as RedisKVClient,
+            metaCoreApiUrl,
             pipeline: pipeline,
             filesPath: config.FILES_PATH,
         });
         await fileEventConsumer.start();
-        console.log('[Startup] FileEventConsumer started, consuming from file:events stream');
+        console.log('[Startup] FileEventConsumer started, consuming via SSE');
 
     } catch (error) {
         console.error('[Startup] Error during startup:', error);

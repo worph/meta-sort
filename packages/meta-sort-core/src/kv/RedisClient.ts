@@ -21,6 +21,7 @@ import {
     buildFilePrefix,
     buildPropertyKey,
 } from './MetadataUtils.js';
+import { MetaCoreApiWriter } from './MetaCoreApiWriter.js';
 
 // ESM/CJS interop for ioredis
 const Redis = (IORedis as any).default ?? IORedis;
@@ -50,6 +51,18 @@ interface RedisClientConfig {
     url: string;
     timeout?: number;
     prefix?: string;
+
+    /**
+     * meta-core HTTP API base URL. When set, write methods
+     * (setMetadataFlat / setMetadataProperty / deleteMetadataFlat) route
+     * through the /meta/{hash} HTTP family instead of writing to Redis
+     * directly. Reads and stream consumption still use the Redis connection.
+     *
+     * Wiring this is the meta-sort half of the api-mediated-access lockdown
+     * (see meta-core docs/api-mediated-access.md, PR B). Leaving it unset
+     * preserves the legacy direct-write path for tests / one-off scripts.
+     */
+    metaCoreApiUrl?: string;
 }
 
 export class RedisKVClient implements IKVClient {
@@ -58,6 +71,7 @@ export class RedisKVClient implements IKVClient {
     private timeout: number;
     private prefix: string;
     private isConnected: boolean = false;
+    private writer: MetaCoreApiWriter | null = null;
 
     // Stream consumer state
     private streamConsumerRunning = false;
@@ -68,8 +82,31 @@ export class RedisKVClient implements IKVClient {
         this.timeout = config.timeout || 30000;
         this.prefix = config.prefix || '';
 
+        if (config.metaCoreApiUrl) {
+            this.writer = new MetaCoreApiWriter({
+                apiUrl: config.metaCoreApiUrl,
+                timeoutMs: this.timeout,
+            });
+            console.log(`[Redis] Writes routed through meta-core API at ${config.metaCoreApiUrl}`);
+        }
+
         // Unique consumer name for this instance
         this.consumerName = `${os.hostname()}-${process.pid}`;
+
+        // HTTP-only mode: no Redis URL AND a writer is configured. Create a
+        // disconnected stub Redis so accidental fallthrough into a Redis
+        // method throws immediately instead of silently connecting to
+        // localhost.
+        if (!config.url && this.writer) {
+            // ioredis requires a config object; lazyConnect prevents the
+            // automatic connect. Any caller that tries to use the Redis
+            // path (e.g. unmigrated stream code) will fail loudly rather
+            // than silently misbehaving.
+            this.redis = new Redis({ host: '127.0.0.1', port: 0, lazyConnect: true, enableOfflineQueue: false });
+            this.isConnected = false;
+            console.log('[Redis] HTTP-only mode — no direct Redis connection');
+            return;
+        }
 
         // Parse Redis URL and create client
         this.redis = new Redis(config.url, {
@@ -102,10 +139,22 @@ export class RedisKVClient implements IKVClient {
     }
 
     /**
-     * Connect to Redis (call before using other methods)
+     * Connect to Redis (call before using other methods).
+     *
+     * In HTTP-only mode (no Redis URL + writer configured), connect is a
+     * no-op — there's no underlying socket to open.
      */
     async connect(): Promise<void> {
         if (this.isConnected) return;
+        if (this.writer && !this.redis.options.host) {
+            // HTTP-only mode stub — nothing to connect.
+            return;
+        }
+        // Skip explicit connect when host is 127.0.0.1 with port 0 (HTTP-only stub).
+        const opts = this.redis.options as { host?: string; port?: number };
+        if (opts && opts.port === 0) {
+            return;
+        }
         await this.redis.connect();
     }
 
@@ -163,6 +212,11 @@ export class RedisKVClient implements IKVClient {
     }
 
     async health(): Promise<boolean> {
+        if (this.writer) {
+            // Probe meta-core /health rather than Redis PING; that's the
+            // surface the application actually depends on after the lockdown.
+            return this.writer.health();
+        }
         try {
             const result = await this.redis.ping();
             return result === 'PONG';
@@ -271,6 +325,12 @@ export class RedisKVClient implements IKVClient {
         metadata: any,
         excludeFields: string[] = []
     ): Promise<void> {
+        if (this.writer) {
+            // PATCH /meta/{hash} — meta-core handles the flat-key fanout and
+            // the file:__index__ membership atomically server-side.
+            return this.writer.setMetadataFlat(hashId, metadata, excludeFields);
+        }
+
         const prefix = buildFilePrefix(hashId);
         const pairs = flattenMetadata(metadata, prefix, excludeFields);
 
@@ -296,6 +356,20 @@ export class RedisKVClient implements IKVClient {
     }
 
     async getMetadataFlat(hashId: string): Promise<any | null> {
+        if (this.writer) {
+            // GET /meta/{hash} via HTTP — returns the flat map directly,
+            // so we don't need a Redis SCAN/MGET round trip. Reconstruct
+            // the nested structure consumers expect.
+            const flat = await this.writer.getMetadataFlat(hashId);
+            if (!flat) return null;
+            const prefix = buildFilePrefix(hashId);
+            const pairs: KeyValuePair[] = Object.entries(flat).map(([field, value]) => ({
+                key: `${prefix}/${field}`,
+                value: value as string,
+            }));
+            return reconstructMetadata(pairs, prefix);
+        }
+
         const keyPrefix = this.buildKey(`file:${hashId}/`);
 
         // Scan for all keys with this prefix
@@ -329,6 +403,13 @@ export class RedisKVClient implements IKVClient {
     }
 
     async getMetadata(hashId: string, propertyPath: string): Promise<any | null> {
+        if (this.writer) {
+            // GET /meta/{hash}/{prop} via HTTP; meta-core returns text/plain
+            // and the writer mirrors the JSON-or-raw fallback the Redis path
+            // uses below.
+            return this.writer.getMetadata(hashId, propertyPath);
+        }
+
         const key = this.buildKey(`file:${hashId}/${propertyPath}`);
         const value = await this.redis.get(key);
 
@@ -346,6 +427,10 @@ export class RedisKVClient implements IKVClient {
      * Writes to flat key: file:{hashId}/{property}
      */
     async setMetadataProperty(hashId: string, property: string, value: string): Promise<void> {
+        if (this.writer) {
+            return this.writer.setMetadataProperty(hashId, property, value);
+        }
+
         const key = this.buildKey(`file:${hashId}/${property}`);
         await this.redis.set(key, value);
 
@@ -354,6 +439,10 @@ export class RedisKVClient implements IKVClient {
     }
 
     async deleteMetadataFlat(hashId: string): Promise<number> {
+        if (this.writer) {
+            return this.writer.deleteMetadataFlat(hashId);
+        }
+
         const keyPrefix = this.buildKey(`file:${hashId}/`);
 
         // Scan and delete all keys with this prefix
@@ -378,6 +467,9 @@ export class RedisKVClient implements IKVClient {
     }
 
     async getAllHashIds(): Promise<string[]> {
+        if (this.writer) {
+            return this.writer.getAllHashIds();
+        }
         const indexKey = this.buildKey('file:__index__');
         return await this.redis.smembers(indexKey);
     }

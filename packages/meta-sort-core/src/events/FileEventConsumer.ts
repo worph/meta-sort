@@ -1,14 +1,20 @@
 /**
  * FileEventConsumer
  *
- * Consumes file events from meta-core via Redis Stream.
+ * Consumes file events from meta-core via SSE (Server-Sent Events).
  * When events are received, they are forwarded to the StreamingPipeline.
  *
- * This enables meta-sort to run without direct filesystem access - it receives
+ * This enables meta-sort to run without direct filesystem access — it receives
  * file discovery events from meta-core and processes files via WebDAV.
+ *
+ * Previously consumed `file:events` via Redis Streams XREADGROUP. The
+ * api-mediated-access migration (PR C) routes this through meta-core's HTTP
+ * /api/events/files endpoint instead, so consumers no longer need direct
+ * Redis access. Cursor durability is now the consumer's responsibility —
+ * see SSEEventClient.
  */
 
-import type { RedisKVClient, StreamMessage } from '../kv/RedisClient.js';
+import { SSEEventClient, type SSEEvent } from './SSEEventClient.js';
 
 // Pipeline interface (minimal, matching StreamingPipeline)
 interface Pipeline {
@@ -18,13 +24,9 @@ interface Pipeline {
     reset(): Promise<void>;
 }
 
-// Redis Stream configuration
-const EVENTS_STREAM = 'file:events';
-const CONSUMER_GROUP = 'meta-sort-processor';
-
 export interface FileEventConsumerOptions {
-    /** Redis KV client */
-    kvClient: RedisKVClient;
+    /** meta-core API base URL (e.g. http://metacore-app:9000). */
+    metaCoreApiUrl: string;
 
     /** Pipeline to receive events */
     pipeline: Pipeline;
@@ -32,115 +34,104 @@ export interface FileEventConsumerOptions {
     /** Base path for files (e.g., /files). Paths from meta-core are relative and need this prefix. */
     filesPath?: string;
 
-    /** Block timeout in milliseconds for stream reads */
-    blockMs?: number;
+    /** Where to persist the SSE cursor. Defaults to /meta-core/cursors/meta-sort-files.cursor. */
+    cursorPath?: string;
 }
 
 export class FileEventConsumer {
-    private kvClient: RedisKVClient;
     private pipeline: Pipeline;
     private filesPath: string;
-    private blockMs: number;
+    private sse: SSEEventClient;
     private isRunning = false;
 
     constructor(options: FileEventConsumerOptions) {
-        this.kvClient = options.kvClient;
         this.pipeline = options.pipeline;
         this.filesPath = options.filesPath ?? '/files';
-        this.blockMs = options.blockMs ?? 5000;
+
+        const apiUrl = options.metaCoreApiUrl.replace(/\/+$/, '');
+        const cursorPath = options.cursorPath ?? '/meta-core/cursors/meta-sort-files.cursor';
+
+        this.sse = new SSEEventClient({
+            url: `${apiUrl}/api/events/files`,
+            cursorPath,
+            logTag: '[FileEventConsumer]',
+            onEvent: (e) => this.handleSSEEvent(e),
+            // gap on file:events means we missed retention. Easiest correct
+            // response: ask meta-core for a watcher rescan so the StreamingPipeline
+            // can rebuild from a known-good baseline.
+            onGap: () => {
+                console.warn('[FileEventConsumer] Stream cursor trimmed — pipeline will rebuild from next reset event');
+            },
+        });
     }
 
     /**
-     * Start consuming events from Redis Stream
+     * Start consuming events from the meta-core SSE endpoint.
      */
     async start(): Promise<void> {
         if (this.isRunning) {
             console.log('[FileEventConsumer] Already running');
             return;
         }
-
         this.isRunning = true;
-        console.log(`[FileEventConsumer] Starting stream consumer for ${EVENTS_STREAM}...`);
-
-        // Initialize consumer group
-        await this.kvClient.initStreamConsumer(EVENTS_STREAM, CONSUMER_GROUP);
-
-        // Process any pending entries from crashed consumers
-        await this.kvClient.processPendingEntries(
-            EVENTS_STREAM,
-            CONSUMER_GROUP,
-            30000, // 30 second idle threshold
-            async (message) => this.handleMessage(message)
-        );
-
-        // Start consumer loop in background (don't await - runs indefinitely)
-        this.kvClient.startStreamConsumer(
-            EVENTS_STREAM,
-            CONSUMER_GROUP,
-            async (message) => this.handleMessage(message),
-            this.blockMs
-        ).catch(error => {
-            console.error('[FileEventConsumer] Stream consumer error:', error);
+        console.log('[FileEventConsumer] Starting SSE stream consumer for /api/events/files...');
+        // Fire-and-forget. SSEEventClient.start() returns only when stopped.
+        this.sse.start().catch(error => {
+            console.error('[FileEventConsumer] Stream consumer terminated:', error);
         });
-
-        console.log('[FileEventConsumer] Stream consumer started');
+        console.log('[FileEventConsumer] SSE stream consumer started');
     }
 
     /**
      * Stop consuming events
      */
-    stop(): void {
+    async stop(): Promise<void> {
         if (!this.isRunning) {
             return;
         }
-
         this.isRunning = false;
-        this.kvClient.stopStreamConsumer();
+        await this.sse.stop();
         console.log('[FileEventConsumer] Stopped');
     }
 
-    /**
-     * Handle a stream message
-     */
-    private async handleMessage(message: StreamMessage): Promise<void> {
+    private async handleSSEEvent(e: SSEEvent): Promise<void> {
         // Convert relative path to absolute path
         const toAbsolutePath = (relativePath: string): string => {
-            // If path is already absolute, return as-is
-            if (relativePath.startsWith('/')) {
-                return relativePath;
-            }
-            // Otherwise, prepend filesPath
+            if (!relativePath) return relativePath;
+            if (relativePath.startsWith('/')) return relativePath;
             return `${this.filesPath}/${relativePath}`;
         };
 
-        switch (message.type) {
+        const path: string = e.data?.path ?? '';
+        const midhash256: string | undefined = e.data?.midhash256 ?? undefined;
+        const oldPath: string | undefined = e.data?.oldPath ?? undefined;
+        const watcherId: string | undefined = e.data?.watcherId ?? undefined;
+
+        switch (e.event) {
             case 'reset':
-                console.log(`[FileEventConsumer] Received reset event from watcher: ${message.watcherId || 'all'}`);
+                console.log(`[FileEventConsumer] Received reset event from watcher: ${watcherId || 'all'}`);
                 await this.pipeline.reset();
                 break;
 
             case 'add':
-                this.pipeline.handleFileAdded(toAbsolutePath(message.path), message.midhash256);
+                if (path) this.pipeline.handleFileAdded(toAbsolutePath(path), midhash256);
                 break;
 
             case 'change':
-                this.pipeline.handleFileChanged(toAbsolutePath(message.path), message.midhash256);
+                if (path) this.pipeline.handleFileChanged(toAbsolutePath(path), midhash256);
                 break;
 
             case 'delete':
-                this.pipeline.handleFileDeleted(toAbsolutePath(message.path));
+                if (path) this.pipeline.handleFileDeleted(toAbsolutePath(path));
                 break;
 
             case 'rename':
-                // Handle rename as delete + add
-                if (message.oldPath) {
-                    this.pipeline.handleFileDeleted(toAbsolutePath(message.oldPath));
-                }
-                this.pipeline.handleFileAdded(toAbsolutePath(message.path), message.midhash256);
+                if (oldPath) this.pipeline.handleFileDeleted(toAbsolutePath(oldPath));
+                if (path) this.pipeline.handleFileAdded(toAbsolutePath(path), midhash256);
                 break;
 
             default:
-                console.warn(`[FileEventConsumer] Unknown event type: ${message.type}`);
+                console.warn(`[FileEventConsumer] Unknown event type: ${e.event}`);
         }
     }
 }
@@ -149,12 +140,12 @@ export class FileEventConsumer {
  * Create a FileEventConsumer with default configuration
  */
 export function createFileEventConsumer(
-    kvClient: RedisKVClient,
+    metaCoreApiUrl: string,
     pipeline: Pipeline,
     options?: Partial<FileEventConsumerOptions>
 ): FileEventConsumer {
     return new FileEventConsumer({
-        kvClient,
+        metaCoreApiUrl,
         pipeline,
         ...options
     });

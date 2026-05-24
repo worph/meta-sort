@@ -73,13 +73,17 @@ export class KVManager {
     }
 
     /**
-     * Create Redis client from URL
+     * Create Redis client from URL. When apiUrl is supplied, the resulting
+     * client routes writes through meta-core's HTTP API (PR B of the
+     * api-mediated-access lockdown) while keeping reads + stream consumption
+     * on the direct Redis connection.
      */
-    private async createRedisClient(redisUrl: string): Promise<RedisKVClient> {
+    private async createRedisClient(redisUrl: string, apiUrl?: string): Promise<RedisKVClient> {
         const client = new RedisKVClient({
             url: redisUrl,
             timeout: 30000,
-            prefix: '' // No prefix for shared access
+            prefix: '', // No prefix for shared access
+            metaCoreApiUrl: apiUrl,
         });
 
         await client.connect();
@@ -121,8 +125,16 @@ export class KVManager {
         // Wait for leader and connect
         try {
             const leaderInfo = await this.leaderClient.waitForLeader(30000);
-            console.log(`[KVManager] Connecting to Redis at ${leaderInfo.redisUrl}...`);
-            this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
+            if (leaderInfo.redisUrl) {
+                // api-mediated-access PR D removes redisUrl from leader info.
+                // Until that lands we still log it but services boot fine
+                // when it's absent — all writes/reads route through HTTP.
+                console.warn('[KVManager] Leader info still publishes redisUrl; direct Redis access is being deprecated, prefer meta-core HTTP');
+                console.log(`[KVManager] Connecting to Redis at ${leaderInfo.redisUrl}...`);
+            } else {
+                console.log('[KVManager] redisUrl absent in leader info — running in HTTP-only mode');
+            }
+            this.kvClient = await this.createRedisClient(leaderInfo.redisUrl, leaderInfo.apiUrl);
 
             // Configure WebDAV client with leader's WebDAV URL (prefer internal for container-to-container)
             const webdavUrl = leaderInfo.webdavUrlInternal ?? leaderInfo.webdavUrl;
@@ -169,7 +181,7 @@ export class KVManager {
         try {
             const leaderInfo = await this.leaderClient.waitForLeader(30000);
             console.log(`[KVManager] Reconnecting to Redis at ${leaderInfo.redisUrl}...`);
-            this.kvClient = await this.createRedisClient(leaderInfo.redisUrl);
+            this.kvClient = await this.createRedisClient(leaderInfo.redisUrl, leaderInfo.apiUrl);
 
             // Reconfigure WebDAV client with new leader's WebDAV URL (prefer internal for container-to-container)
             const webdavUrl = leaderInfo.webdavUrlInternal ?? leaderInfo.webdavUrl;
