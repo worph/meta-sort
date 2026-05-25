@@ -587,7 +587,7 @@ Deduplication logic remains identical. Fast-hash serves the same purpose as full
 
 The Stremio addon retrieves files by metadata queries (title, season, episode), not by hash. The hash is used internally for metadata storage. Changing to fast-hash is transparent to the addon.
 
-### Meta-Orbit (Distributed Synchronization)
+### meta-share (Distributed Synchronization)
 
 **Impact:** Hash serves as content identifier for P2P synchronization.
 
@@ -716,7 +716,7 @@ MetaMesh implements a two-phase processing pipeline:
 **Phase 2: Hash Processing (Full Hashes - Background)**
 - Compute full-file hashes: SHA-256, SHA-1, MD5, CRC32 (slow, minutes)
 - Update etcd with additional hash metadata
-- Required for Meta-Orbit distributed synchronization
+- Required for meta-share distributed synchronization
 
 ### Why Both Are Needed
 
@@ -726,7 +726,7 @@ MetaMesh implements a two-phase processing pipeline:
 - **Fast deduplication**: Quickly identify potential duplicates
 
 **Full Hash Purpose:**
-- **Meta-Orbit integration**: Distributed P2P synchronization requires cryptographically secure hashes
+- **meta-share integration**: Distributed P2P synchronization requires cryptographically secure hashes
 - **External system compatibility**: Torrent verification, IPFS CIDs
 - **Collision resolution**: If midhash256 collision detected, full SHA-256 provides definitive answer
 
@@ -744,7 +744,7 @@ Light Processing (32 workers, parallel)
 Hash Processing (8 workers, background)
   - Compute SHA-256, SHA-1, MD5, CRC32 (15+ minutes for 50GB)
   - Update etcd with full hashes
-  - Enable Meta-Orbit synchronization ✓
+  - Enable meta-share synchronization ✓
 ```
 
 ### Collision Detection and Handling
@@ -778,4 +778,4 @@ The trade-offs—weaker cryptographic guarantees, potential collisions for adver
 
 This architecture aligns with Meta-Mesh's design philosophy: **optimize for the common case** (large media files, organic content, personal libraries) while maintaining **practicality and performance** over theoretical perfection.
 
-Meta-Mesh leverages midhash256 for **immediate file availability** while computing full SHA-256 hashes **in the background** for Meta-Orbit distributed synchronization and external system compatibility. This dual-hash approach provides both speed and security.
+Meta-Mesh leverages midhash256 for **immediate file availability** while computing full SHA-256 hashes **in the background** for meta-share distributed synchronization and external system compatibility. This dual-hash approach provides both speed and security.

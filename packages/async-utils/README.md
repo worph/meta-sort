@@ -35,7 +35,7 @@ lazyValue().then(value => console.log(value));
 ### Listener Cleaner
 
 ```typescript
-import { ListenerCleaner } from "worph/async-utils";
+import { ListenerCleaner } from "@worph/async-utils";
 
 const cleaner = new ListenerCleaner();
 cleaner.add(() => console.log("Cleanup action"));

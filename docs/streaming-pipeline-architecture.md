@@ -1,863 +1,302 @@
 # Streaming Pipeline Architecture
 
-**Author**: Meta Mesh Development Team
-**Last Updated**: 2025-11-03
-**Status**: Current Implementation
+The meta-sort streaming pipeline processes media files as they arrive from
+meta-core (the file watcher), classifies them by extension, extracts light
+metadata + a permanent identifier, and dispatches heavier work to container
+plugins. It is implemented in
+`packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/StreamingPipeline.ts`.
 
 ---
 
-## Table of Contents
+## Contents
 
 1. [Overview](#overview)
-2. [Architecture Principles](#architecture-principles)
-3. [Pipeline Stages](#pipeline-stages)
-4. [Component Design](#component-design)
-5. [Data Flow](#data-flow)
-6. [State Management](#state-management)
-7. [Concurrency Model](#concurrency-model)
-8. [Performance Characteristics](#performance-characteristics)
-9. [Architecture Decisions](#architecture-decisions)
-10. [Future Considerations](#future-considerations)
+2. [Event source: meta-core SSE](#event-source-meta-core-sse)
+3. [Pipeline stages](#pipeline-stages)
+4. [State manager](#state-manager)
+5. [Concurrency model](#concurrency-model)
+6. [Reset semantics (generation counter)](#reset-semantics-generation-counter)
+7. [Stats and observability](#stats-and-observability)
+8. [Key code locations](#key-code-locations)
 
 ---
 
 ## Overview
 
-The Meta Mesh streaming pipeline is a **multi-stage asynchronous processing system** designed to efficiently process hundreds of thousands of media files with minimal memory overhead and optimal CPU utilization.
+```
+                  meta-core /api/events/files (SSE)
+                              │
+                              ▼
+                   FileEventConsumer
+                              │   add / change / delete / rename / reset
+                              ▼
+   handleFileAdded ─┐
+   handleFileChanged┤───────► validationQueue (PQueue)
+   handleFileDeleted┘                │   extension filter
+                                     ▼
+                              fastQueue (PQueue)
+                          processLightPhase
+                          - filename parse, FFprobe-light, stats
+                          - midhash256 (permanent ID) computed or
+                            adopted from meta-core's pre-computed value
+                          - KV write → file appears in VFS
+                          - dispatch all enabled container plugins
+                                     │
+                                     ▼
+                              backgroundQueue (PQueue)
+                          processHashPhase
+                          - SHA-256, additional heavy hashing
+                                     │
+                                     ▼
+                  await ContainerPluginScheduler `file:complete`
+                  (or complete immediately if no container plugins)
+                                     │
+                                     ▼
+                              UnifiedProcessingStateManager → DONE
+```
 
-### Key Characteristics
+Two things are worth highlighting because they differ from older
+documentation:
 
-- **Streaming Architecture**: Files are processed as they're discovered, not batched
-- **Multi-Stage Pipeline**: Four independent stages with different concurrency levels
-- **Non-Blocking**: Uses async generators to prevent event loop starvation
-- **Scalable**: Handles 900k+ files and 100TB+ datasets
-- **Separation of Concerns**: Generic file discovery separated from business logic
-
-### Performance Goals
-
-| Metric | Target | Current |
-|--------|--------|---------|
-| Discovery Speed | Immediate streaming | ✅ Achieved |
-| Time to First Result | < 5 seconds | ✅ Achieved |
-| Event Loop Blocking | Zero | ✅ Achieved |
-| Memory Overhead | O(n) for queues only | ✅ Achieved |
-| CPU Utilization | 100% during processing | ✅ Achieved |
+1. **midhash256 is the permanent file ID.** It is computed during the fast
+   queue (or supplied pre-computed by meta-core in the SSE payload) and the
+   file becomes accessible in the VFS as soon as the fast queue commits its
+   KV write. There is no `tempId` and no rename when SHA-256 finishes.
+2. **There is no in-process plugin pipeline.** Filename parsing, ffprobe,
+   TMDB, etc. are container plugins running as separate Docker containers;
+   `StreamingPipeline` dispatches to them via
+   `ContainerPluginScheduler.dispatchAllPlugins` and waits for the
+   scheduler's `file:complete` event before marking the file DONE.
 
 ---
 
-## Architecture Principles
+## Event source: meta-core SSE
 
-### 1. Streaming Over Batching
+meta-sort no longer reads the filesystem directly. File discovery and
+change watching live in meta-core, which streams events over HTTP SSE.
 
-**Problem**: Original implementation waited for complete file discovery before processing, causing 15+ minute delays.
+- **Subscriber:** `src/events/FileEventConsumer.ts` — converts each event
+  to an absolute path (`filesPath` + relative path from meta-core) and
+  forwards it to the pipeline.
+- **Transport:** `src/events/SSEEventClient.ts` — long-lived HTTP
+  connection to `${metaCoreApiUrl}/api/events/files`, with cursor
+  persistence at `/meta-core/cursors/meta-sort-files.cursor`, automatic
+  reconnect, and `Last-Event-ID` resume semantics.
+- **Cursor gap (`gap` event):** the cursor was trimmed out of retention.
+  The default response is to log and wait for the next `reset` event from
+  meta-core; the pipeline rebuilds from there.
 
-**Solution**: Stream files through the pipeline as they're discovered.
+Event types and their effect on the pipeline:
 
-```typescript
-// ❌ Batch Processing (Old)
-const allFiles = await discoverAllFiles();  // Wait for all files
-await processFiles(allFiles);               // Then process
-
-// ✅ Streaming Processing (New)
-for await (const file of discoverFiles()) { // Process as discovered
-    pipeline.validate(file);                 // Immediate processing
-}
-```
-
-### 2. Separation of Concerns
-
-**Problem**: Business logic (extension filtering) was mixed with generic utilities (file discovery).
-
-**Solution**: Clean separation between packages:
-
-- **meta-hash** (Generic Library): Platform-agnostic file discovery
-- **meta-mesh** (Application): Business-specific processing logic
-
-This allows `meta-hash` to be reused in other contexts without Meta Mesh-specific dependencies.
-
-### 3. Event Loop Yielding
-
-**Problem**: Tight synchronous loops starved the Node.js event loop, preventing PQueue from dispatching work.
-
-**Solution**: Use async generators that naturally yield to the event loop:
-
-```typescript
-async *walkDirectory(directory: string): AsyncGenerator<string> {
-    const entries = await readdir(directory);  // Async I/O - yields to event loop
-
-    for (const entry of entries) {
-        yield fullPath;  // Generator yield - allows event loop to process other tasks
-    }
-}
-```
-
-### 4. Independent Stage Queues
-
-**Problem**: Single queue with uniform concurrency doesn't match workload characteristics.
-
-**Solution**: Each stage has its own queue with optimized concurrency:
-
-- **Validation**: High concurrency (fast I/O checks)
-- **Metadata**: Medium concurrency (balanced CPU/I/O)
-- **Hash**: Medium concurrency (CPU-bound operations)
+| SSE event | Pipeline call | Notes |
+|-----------|---------------|-------|
+| `add`     | `handleFileAdded(path, midhash256?)` | Standard new-file path. |
+| `change`  | `handleFileChanged(path, midhash256?)` | Removes any prior state, re-validates. |
+| `delete`  | `handleFileDeleted(path)` | Drops state + calls `fileProcessor.deleteFile`. |
+| `rename`  | delete(oldPath) + add(newPath) | Old path is removed; new path is re-ingested. |
+| `reset`   | `pipeline.reset()` | Increments the reset generation, clears queues. |
 
 ---
 
-## Pipeline Stages
+## Pipeline stages
 
-The pipeline consists of four stages, each optimized for its specific workload:
+### Stage 1: Validation (`validateFile`)
 
-```
-┌─────────────┐    ┌────────────┐    ┌──────────┐    ┌──────┐    ┌──────┐
-│  Discovery  │───▶│ Validation │───▶│ Metadata │───▶│ Hash │───▶│ Done │
-│  (Stream)   │    │ (32 queue) │    │(16 queue)│    │(16 q)│    │      │
-└─────────────┘    └────────────┘    └──────────┘    └──────┘    └──────┘
-   Async Gen        Extension          Quick Meta      Content     Final
-   Yields files     Filtering          Extraction      Hashing     Storage
-```
+`StreamingPipeline.validateFile(filePath, midhash256?)`
 
-### Stage 0: Discovery (Streaming)
+- Extension check against `PipelineConfig.supportedExtensions`
+  (`src/config/SupportedFileTypes.ts`). No I/O.
+- Files with unsupported extensions are removed from the state manager and
+  counted in `filteredCount`. They do not progress.
+- Strict MIME validation is intentionally **not** implemented — the comment
+  in code reserves the option but it is off by default and there is no
+  external library wired in.
+- A generation check protects against in-flight tasks completing after a
+  `reset()` (see [Reset semantics](#reset-semantics-generation-counter)).
+- Valid files are enqueued onto the fast queue via
+  `this.fastQueue.add(() => this.processLightPhase(filePath, midhash256))`.
 
-**Location**: `packages/meta-hash/src/lib/folder-watcher/FolderWatcher.ts`
+### Stage 2: Fast queue (`processLightPhase`)
 
-**Purpose**: Discover all files in watched directories and emit paths as async generator.
+`StreamingPipeline.processLightPhase(filePath, midhash256?)` calls
+`fileProcessor.processLightPhase(...)` which:
 
-**Implementation**:
-```typescript
-async *discoverFiles(directories: string[]): AsyncGenerator<string> {
-    for (const dir of directories) {
-        yield* this.walkDirectory(dir);
-    }
-}
-```
+1. Computes or adopts `midhash256` (the permanent file ID, written as
+   `cid_midhash256` on the metadata record).
+2. Extracts light metadata (filename parsing via `@metazla/filename-tools`,
+   basic stat/ffprobe info — see `src/logic/fileProcessor/` for the
+   adapter, and the file-info / filename-parser / ffmpeg container
+   plugins for the actual work).
+3. Writes metadata to Redis through the KV client. The file is now visible
+   to meta-fuse, meta-stremio, etc.
 
-**Characteristics**:
-- **Concurrency**: N/A (single-threaded recursive walk)
-- **I/O Pattern**: Sequential directory reads with async/await
-- **Output**: File path strings
-- **Filtering**: None (emits all files regardless of type)
-- **Duration**: Depends on filesystem speed and directory depth
+After `processLightPhase` returns, `StreamingPipeline`:
 
-**Key Design Choice**: No filtering logic at this layer keeps the component generic and reusable. All business logic happens in downstream stages.
+- Sends a fire-and-forget `/add` POST to the Stremio addon on
+  `http://localhost:7000` (silent fail if it isn't running).
+- Calls `dispatchContainerPluginTasks(filePath, hashId, existingMeta)` —
+  this iterates every enabled container plugin via
+  `ContainerPluginScheduler.dispatchAllPlugins`. Tasks are routed to the
+  scheduler's own fast / background queues based on each plugin manifest's
+  `defaultQueue`. Plugins write results back through meta-core's `/meta/:hash`
+  API; `StreamingPipeline` does not aggregate them itself.
+- Enqueues the file on the background queue
+  (`processHashPhase`) for the in-process hashing pass.
 
----
+### Stage 3: Background queue (`processHashPhase`)
 
-### Stage 1: Validation (32 Workers)
+`StreamingPipeline.processHashPhase(filePath)` calls
+`fileProcessor.processHashPhase(...)` for the slow in-process hashing
+(SHA-256 and any other heavy hashes the file processor computes).
 
-**Location**: `packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/StreamingPipeline.ts::validateFile()`
+Completion path depends on whether container plugins are configured:
 
-**Purpose**: Fast extension-based filtering to eliminate unsupported file types.
+- **No container plugins:** the file is moved to DONE immediately via
+  `stateManager.completeHashProcessing(filePath, hashId, virtualPath)`.
+- **Container plugins configured:** the background queue completes, but
+  the file stays in `hashProcessing` until the `ContainerPluginScheduler`
+  emits `file:complete` for that `(fileHash, filePath)` pair. The
+  scheduler-side listener (`setContainerPluginScheduler` in
+  `StreamingPipeline.ts`) re-reads metadata from Redis, computes the
+  virtual path via `MetaDataToFolderStruct.renamingRule(...)`, and then
+  transitions the file to DONE.
 
-**Implementation**:
-```typescript
-private async validateFile(filePath: string): Promise<void> {
-    // Extension check (instant, no I/O)
-    const ext = path.extname(filePath).toLowerCase();
-    if (!this.config.supportedExtensions.has(ext)) {
-        return;  // Skip unsupported files
-    }
-
-    // Mark as pending
-    this.config.stateManager.addPending(filePath);
-    this.validatedCount++;
-
-    // Stage 2: Metadata (fire and forget)
-    this.metadataQueue.add(() => this.extractMetadata(filePath));
-}
-```
-
-**Characteristics**:
-- **Concurrency**: 32 workers (CPU count × 2)
-- **I/O Pattern**: Zero disk I/O (string operations only)
-- **Processing Time**: < 1ms per file
-- **Success Rate**: ~65% (video/subtitle/torrent files only)
-- **Queue Behavior**: Typically empty (keeps up with discovery)
-
-**Key Design Choice**: High concurrency (32 workers) is acceptable because validation is pure CPU-bound string operations with no I/O. This ensures validation never becomes a bottleneck.
-
-**MIME Validation (Skipped)**: The original implementation included optional MIME type validation (reading file headers). This was removed because:
-- Requires disk I/O (read first 4KB of each file)
-- Adds ~25% overhead to discovery time
-- Extension checking is sufficient for 99.9% of cases
-- Edge cases are handled gracefully in later stages
+The scheduler listener also defends against three races: a different reset
+generation, a missing `hashProcessing` entry, and a hash-mismatch where the
+callback belongs to a previous attempt for the same path.
 
 ---
 
-### Stage 2: Metadata Extraction (16 Workers)
+## State manager
 
-**Location**: `packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/StreamingPipeline.ts::extractMetadata()`
+`src/logic/UnifiedProcessingStateManager.ts`
 
-**Purpose**: Extract lightweight metadata without computing content hash.
-
-**Implementation**:
-```typescript
-private async extractMetadata(filePath: string): Promise<void> {
-    this.config.stateManager.startLightProcessing(filePath);
-
-    // Call existing light processing logic (quick metadata extraction)
-    const quickMeta = await this.config.fileProcessor.processFileQuick(filePath);
-
-    // Mark light processing as complete and move to hash queue
-    this.config.stateManager.completeLightProcessing(filePath);
-    this.metadataCount++;
-
-    // Stage 3: Hash (fire and forget)
-    this.hashQueue.add(() => this.computeHash(filePath));
-}
-```
-
-**What Metadata is Extracted**:
-1. **Filename Parsing** (via `filename-tool`):
-   - Series title, season, episode number
-   - Movie title, year
-   - Quality indicators (1080p, 4K, etc.)
-   - Language codes
-   - Release group
-
-2. **File System Stats**:
-   - File size
-   - Modification time
-   - Permissions
-
-3. **Basic Media Info** (via FFmpeg):
-   - Duration
-   - Container format
-   - Codec information (video/audio)
-   - Resolution (width × height)
-   - Bitrate
-
-**Characteristics**:
-- **Concurrency**: 16 workers (CPU count)
-- **I/O Pattern**: Light disk reads + FFmpeg process spawning
-- **Processing Time**: ~470ms average per file
-- **Storage**: Temporary metadata stored in etcd with `tempId`
-- **Virtual FS**: Files appear in virtual filesystem immediately after this stage
-
-**Key Design Choice**: This stage extracts "just enough" metadata to populate the virtual filesystem and make files available to users, while deferring expensive hash computation to the next stage. This provides immediate value while processing continues in the background.
-
----
-
-### Stage 3: Hash Computation (16 Workers)
-
-**Location**: `packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/StreamingPipeline.ts::computeHash()`
-
-**Purpose**: Compute content hashes and perform deep media analysis.
-
-**Implementation**:
-```typescript
-private async computeHash(filePath: string): Promise<void> {
-    const current = this.hashCount + 1;
-    const queueSize = this.discoveredCount;
-
-    await this.config.fileProcessor.processFile(filePath, current, queueSize);
-
-    this.hashCount++;
-    this.config.stateManager.completeHashProcessing(filePath);
-}
-```
-
-**What is Computed**:
-1. **Content Hashes** (via `meta-hash`):
-   - SHA-256 (primary hash, used for deduplication)
-   - SHA-1 (compatibility with legacy systems)
-   - MD5 (fast duplicate detection)
-   - CRC32 (checksum verification)
-
-2. **Deep Media Analysis** (via FFmpeg):
-   - Audio track details (language, codec, channels)
-   - Subtitle track details (language, format)
-   - Chapter information
-   - Embedded metadata (title, artist, etc.)
-
-**Characteristics**:
-- **Concurrency**: 16 workers (CPU count)
-- **I/O Pattern**: Full file read (streaming hash computation)
-- **Processing Time**: Varies by file size (50MB/s typical throughput)
-- **Storage**: Final metadata stored in etcd indexed by content hash
-- **Memory**: Streaming hashing (fixed memory footprint regardless of file size)
-
-**Key Design Choice**: Hash computation is CPU and I/O intensive, so we limit concurrency to CPU count to avoid thrashing. The hash is computed in streaming fashion (read chunks → update hash → repeat) to maintain constant memory usage even for 100GB+ files.
-
-**Duplicate Detection**: Once a hash is computed, the system can:
-- Detect exact duplicates (same hash)
-- Detect version duplicates (same title/episode but different quality)
-- Build virtual folder structure organized by content
-
----
-
-### Stage 4: Completion
-
-**Location**: `packages/meta-sort/packages/meta-sort-core/src/logic/UnifiedProcessingStateManager.ts::completeHashProcessing()`
-
-**Purpose**: Mark file as fully processed and finalize metadata.
-
-**Actions**:
-1. Delete temporary metadata (`/tmp/{tempId}` key in etcd)
-2. Store final metadata (`/file/{hash}` key in etcd)
-3. Update virtual filesystem structure
-4. Record performance metrics
-5. Trigger duplicate detection (if enabled)
-
-**Final Metadata Structure**:
-```typescript
-{
-    hash: "sha256:abc123...",           // Primary content hash
-    filePath: "/data/watch/...",        // Original file location
-    virtualPath: "/Anime/Series/S01/", // Virtual filesystem path
-    size: 1234567890,                   // File size in bytes
-    duration: 1440,                     // Duration in seconds
-    title: "Series Name",               // Parsed title
-    season: 1,                          // Season number
-    episode: 5,                         // Episode number
-    resolution: "1920x1080",            // Video resolution
-    codec: "h264",                      // Video codec
-    // ... many more fields
-}
-```
-
----
-
-## Component Design
-
-### FolderWatcher (meta-hash)
-
-**File**: `packages/meta-hash/src/lib/folder-watcher/FolderWatcher.ts`
-
-**Responsibility**: Generic file discovery with no business logic.
-
-**Public API**:
-```typescript
-class FolderWatcher {
-    // Discover all files in directories (returns async generator)
-    async *discoverFiles(directories: string[]): AsyncGenerator<string>
-
-    // Watch directories for changes (using chokidar)
-    watch(
-        directories: string[],
-        callbacks: {
-            onAdd?: (filePath: string) => void | Promise<void>;
-            onChange?: (filePath: string) => void | Promise<void>;
-            onUnlink?: (filePath: string) => void | Promise<void>;
-        },
-        options?: WatchOptions
-    ): chokidar.FSWatcher
-}
-```
-
-**Design Rationale**:
-- **Generic**: No knowledge of video files, extensions, or Meta Mesh concepts
-- **Reusable**: Can be used in other projects (e.g., backup tools, file indexers)
-- **Minimal Dependencies**: Only depends on Node.js built-ins and chokidar
-- **Error Handling**: Gracefully handles permission errors, missing directories, etc.
-
----
-
-### StreamingPipeline (meta-mesh)
-
-**File**: `packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/StreamingPipeline.ts`
-
-**Responsibility**: Orchestrate multi-stage file processing with application-specific logic.
-
-**Public API**:
-```typescript
-class StreamingPipeline {
-    // Start processing files from discovery stream
-    async start(discoveryStream: AsyncGenerator<string>): Promise<void>
-
-    // Handle file change events
-    async handleFileAdded(filePath: string): Promise<void>
-    async handleFileChanged(filePath: string): Promise<void>
-    async handleFileDeleted(filePath: string): Promise<void>
-
-    // Get pipeline statistics
-    getStats(): PipelineStats
-}
-```
-
-**Design Rationale**:
-- **Application-Specific**: Knows about video files, subtitles, torrents
-- **Configurable**: Concurrency levels, supported extensions, validation rules
-- **Observable**: Provides real-time statistics via `getStats()`
-- **Fire-and-Forget**: Stages don't block each other (errors logged but don't halt pipeline)
-
----
-
-### UnifiedProcessingStateManager (meta-mesh)
-
-**File**: `packages/meta-sort/packages/meta-sort-core/src/logic/UnifiedProcessingStateManager.ts`
-
-**Responsibility**: Track files through the 4-state processing lifecycle.
-
-**States**:
-```typescript
-type FileState =
-    | 'pending'         // Discovered, waiting for validation
-    | 'lightProcessing' // Extracting metadata
-    | 'hashProcessing'  // Computing content hash
-    | 'done'            // Fully processed
-```
-
-**Public API**:
-```typescript
-class UnifiedProcessingStateManager {
-    addPending(filePath: string): void
-    startLightProcessing(filePath: string): void
-    completeLightProcessing(filePath: string, tempId?: string): void
-    completeHashProcessing(filePath: string, hash?: string): void
-    removeFile(filePath: string): void
-    getSnapshot(): UnifiedProcessingSnapshot
-}
-```
-
-**Design Rationale**:
-- **Centralized State**: Single source of truth for file processing status
-- **Performance Metrics**: Records timestamps for each stage transition
-- **Observability**: Provides snapshot API for monitoring UIs
-- **Memory Efficient**: Limits history to last 100 completed files
-
----
-
-## Data Flow
-
-### Initial Scan (Cold Start)
+States: `'discovered' | 'lightProcessing' | 'hashProcessing' | 'done'`.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ 1. FolderWatcher starts async generator                             │
-│    for await (const file of folderWatcher.discoverFiles([...]))    │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 2. Discovery yields file paths one-by-one                           │
-│    "/data/watch/Anime/Series/S01E01.mkv"  ────────┐                │
-│    "/data/watch/Anime/Series/S01E02.mkv"  ────────┤                │
-│    "/data/watch/Movies/Film.mp4"          ────────┤                │
-│    ...                                             │                │
-└────────────────────────────────────────────────────┼────────────────┘
-                                                     │
-                                                     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 3. StreamingPipeline.start() consumes generator                     │
-│    - Validates each file (extension check)                          │
-│    - Adds to metadata queue (fire-and-forget)                       │
-│    - Logs progress every 1000 files                                 │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 4. Validation Queue (32 workers) processes files                    │
-│    - Filter by extension (.mkv, .mp4, .srt, etc.)                  │
-│    - State: pending → ready for metadata                            │
-│    - Queue typically empty (keeps up with discovery)                │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 5. Metadata Queue (16 workers) processes files                      │
-│    - Extract filename metadata (title, season, episode)             │
-│    - Run FFmpeg for basic media info                                │
-│    - Store temp metadata in etcd (/tmp/{tempId})                    │
-│    - State: lightProcessing                                         │
-│    - Duration: ~470ms average                                       │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 6. Hash Queue (16 workers) processes files                          │
-│    - Compute content hashes (SHA-256, SHA-1, MD5, CRC32)           │
-│    - Deep FFmpeg analysis (all tracks, chapters)                    │
-│    - Delete temp metadata, store final metadata (/file/{hash})     │
-│    - Update virtual filesystem structure                            │
-│    - State: hashProcessing → done                                   │
-│    - Duration: Varies by file size                                  │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### File Change Event (Hot Path)
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ 1. chokidar detects file system change                              │
-│    - add: New file created                                          │
-│    - change: Existing file modified                                 │
-│    - unlink: File deleted                                           │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 2. FolderWatcher invokes callback                                   │
-│    onAdd(filePath)    ──▶  pipeline.handleFileAdded()              │
-│    onChange(filePath) ──▶  pipeline.handleFileChanged()            │
-│    onUnlink(filePath) ──▶  pipeline.handleFileDeleted()            │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 3. Pipeline handles event                                           │
-│    - Added: Process new file through validation queue               │
-│    - Changed: Remove old metadata, reprocess through validation     │
-│    - Deleted: Remove from state manager and etcd                    │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## State Management
-
-### File State Transitions
-
-```
-┌─────────┐  addPending()           ┌────────────────┐
-│ PENDING ├────────────────────────▶│ LIGHT          │
-└─────────┘                          │ PROCESSING     │
-    ▲                                └────────┬───────┘
-    │                                         │
-    │ removeFile()                            │ completeLightProcessing()
-    │ (on error)                              │
-    │                                         ▼
-    │                                ┌────────────────┐
-    │                                │ HASH           │
-    └────────────────────────────────┤ PROCESSING     │
-                                     └────────┬───────┘
+discovered ── startLightProcessing ──► lightProcessing
                                               │
-                                              │ completeHashProcessing()
-                                              │
+                                              │ completeLightProcessing
                                               ▼
-                                     ┌────────────────┐
-                                     │ DONE           │
-                                     └────────────────┘
+                                       hashProcessing ── completeHashProcessing ──► done
 ```
 
-### State Storage Locations
+Notable details:
 
-| State | In-Memory Map | etcd Key | Notes |
-|-------|--------------|----------|-------|
-| pending | ✅ `Map<path, state>` | ❌ | Lightweight, no disk I/O |
-| lightProcessing | ✅ `Map<path, state>` | ✅ `/tmp/{tempId}` | Temp metadata for virtual FS |
-| hashProcessing | ✅ `Map<path, state>` | ✅ `/tmp/{tempId}` | Same as light processing |
-| done | ✅ `Array<state>` (last 100) | ✅ `/file/{hash}` | Final metadata, temp deleted |
-
-### State Metadata
-
-Each state tracks detailed timing information:
-
-```typescript
-interface UnifiedFileState {
-    filePath: string;
-    state: FileState;
-    tempId?: string;              // Temporary etcd key
-    hash?: string;                // Final content hash (SHA-256)
-    virtualPath?: string;         // Path in virtual filesystem
-    error?: string;               // Error message if processing failed
-
-    // Timestamps
-    discoveredAt?: number;
-    lightProcessingStartedAt?: number;
-    lightProcessingCompletedAt?: number;
-    hashProcessingStartedAt?: number;
-    hashProcessingCompletedAt?: number;
-
-    // Processing times (milliseconds)
-    lightProcessingTime?: number;
-    hashProcessingTime?: number;
-    totalProcessingTime?: number;
-}
-```
-
-This enables detailed performance analysis and bottleneck identification.
+- `done` is kept as a bounded array (`maxDoneHistory = 100`); a running
+  `totalProcessedCount` survives that truncation.
+- `seenHashes: Set<string>` + `duplicateCount` track per-content duplicate
+  ingestion.
+- `UnifiedFileState` tracks per-stage `*StartedAt` / `*CompletedAt`
+  timestamps and derived `*ProcessingTime` values; this is what the
+  `/api/processing/status` and `/api/processing/queue` endpoints expose.
 
 ---
 
-## Concurrency Model
+## Concurrency model
 
-### Queue Configuration
+Three independent `p-queue` instances inside `StreamingPipeline`:
 
-The pipeline uses **PQueue** (p-queue) for concurrency control with stage-specific limits:
+| Queue | Field | Configured by |
+|-------|-------|---------------|
+| Validation | `validationQueue` | `PipelineConfig.validationConcurrency` |
+| Fast (light phase) | `fastQueue` | `PipelineConfig.fastQueueConcurrency` |
+| Background (hash phase) | `backgroundQueue` | `PipelineConfig.backgroundQueueConcurrency` |
 
-```typescript
-// packages/meta-sort/packages/meta-sort-core/src/index.ts
+Defaults are derived in `src/index.ts`:
+
+```ts
 const cpuCount = os.cpus().length;
+const defaultBackgroundWorkers = Math.max(1, Math.floor(cpuCount / 2));
 const validationConcurrency = config.MAX_WORKER_THREADS
-    ? config.MAX_WORKER_THREADS * 2
-    : cpuCount * 2;                        // 32 on 16-core system
-
-const metadataConcurrency = config.MAX_WORKER_THREADS
-    || cpuCount;                            // 16 on 16-core system
-
-const hashConcurrency = config.MAX_WORKER_THREADS
-    || cpuCount;                            // 16 on 16-core system
+    ? config.MAX_WORKER_THREADS * 2 : cpuCount * 2;
+const fastQueueConcurrency = config.MAX_WORKER_THREADS
+    ?? cpuCount;
+const backgroundQueueConcurrency = config.MAX_WORKER_THREADS
+    ?? defaultBackgroundWorkers;
 ```
 
-### Concurrency Rationale
+i.e. on a host with `os.cpus().length = N`:
 
-| Stage | Concurrency | Rationale |
-|-------|-------------|-----------|
-| **Validation** | CPU × 2 | Pure CPU-bound string operations, no I/O. High concurrency ensures validation never blocks discovery. |
-| **Metadata** | CPU × 1 | Mixed CPU/I/O workload. Spawns FFmpeg processes. One per core prevents context switching overhead. |
-| **Hash** | CPU × 1 | CPU and I/O intensive (reads entire file). One per core maximizes throughput without thrashing. |
+- `validationConcurrency = N * 2`
+- `fastQueueConcurrency = N`
+- `backgroundQueueConcurrency = floor(N / 2)` (minimum 1)
 
-### Backpressure Handling
+Setting `MAX_WORKER_THREADS=M` overrides all three to `(M * 2, M, M)`.
 
-PQueue provides natural backpressure:
+Note: container-plugin tasks do **not** share these queues — they are
+scheduled inside `ContainerPluginScheduler` (`src/container-plugins/`),
+whose own concurrencies come from `FAST_QUEUE_CONCURRENCY` (default 32)
+and the same `backgroundQueueConcurrency` value as above. See
+`plugin-task-queue-architecture.md`.
 
-```typescript
-// Fire-and-forget pattern with error handling
-this.metadataQueue.add(() => this.extractMetadata(filePath))
-    .catch(err => console.error(`[Pipeline] Metadata error:`, err.message));
-```
+### Pause / resume
 
-- **Queue Size**: Number of pending tasks
-- **Pending**: Number of tasks currently executing
-- **Behavior**: When queue fills up, new tasks wait (no memory explosion)
-
-### Memory Characteristics
-
-For 900k files with 16 workers:
-
-```
-Memory Usage ≈ Queue Overhead + Worker Memory
-
-Queue Overhead:
-  - Validation queue: ~0 (keeps up with discovery)
-  - Metadata queue: ~100-500 tasks = ~50KB
-  - Hash queue: ~1000-5000 tasks = ~500KB
-
-Worker Memory:
-  - Metadata workers: 16 × ~50MB = 800MB
-  - Hash workers: 16 × ~100MB = 1.6GB
-
-Total: ~2.5GB (well within 16GB Node.js heap limit)
-```
+`pipeline.pause()` / `pipeline.resume()` pause all three internal queues.
+The API server wires these to operator controls (see
+`UnifiedAPIServer.setStreamingPipeline`). In-flight tasks finish; no new
+ones start until resume.
 
 ---
 
-## Performance Characteristics
+## Reset semantics (generation counter)
 
-### Discovery Phase
+`StreamingPipeline` keeps a `resetGeneration` counter and a per-file
+`fileGenerations: Map<string, number>`. Every time `reset()` is called
+(triggered by a `reset` SSE event from meta-core, or by an operator action
+that fans out to one), the counter increments and the queues are cleared.
 
-**Throughput**: ~1000-5000 files/second (depends on filesystem)
+Each long-running phase checks `fileGenerations.get(filePath) ===
+resetGeneration` at every yield point and bails out silently if the file
+belongs to an older generation. This is the primary defense against:
 
-**Bottleneck**: Filesystem I/O (directory reads)
+- Old tasks completing into a cleared state manager.
+- Container plugin callbacks arriving for files that were since
+  rescheduled (callback handler additionally verifies the hash matches the
+  current `hashProcessing` entry).
 
-**Optimization**: Async generator yields to event loop, preventing blocking
-
-**Metrics** (from logs):
-```
-[Pipeline] Progress: discovered=13000, validated=11937, metadata=1604, hash=0
-```
-
-- 13,000 files discovered
-- 11,937 validated (91% match extensions)
-- 1,604 metadata extracted (12% complete)
-- 0 hashes computed (still in queue)
-
-### Metadata Extraction Phase
-
-**Throughput**: ~34 files/second (16 workers ÷ 470ms average)
-
-**Bottleneck**: FFmpeg process spawning + basic media analysis
-
-**Optimization**: Limited concurrency prevents process thrashing
-
-**Average Times**:
-- Filename parsing: ~5ms
-- File stats: ~1ms
-- FFmpeg basic info: ~460ms
-- etcd write: ~4ms
-- **Total**: ~470ms
-
-### Hash Computation Phase
-
-**Throughput**: Varies by file size
-
-| File Size | Hash Time | Throughput |
-|-----------|-----------|------------|
-| 100MB | ~2 seconds | 50MB/s |
-| 1GB | ~20 seconds | 50MB/s |
-| 10GB | ~200 seconds | 50MB/s |
-| 50GB | ~1000 seconds | 50MB/s |
-
-**Bottleneck**: Disk read speed + SHA-256 computation
-
-**Optimization**: Streaming hash (constant memory), parallel workers
-
-### End-to-End Performance
-
-For a typical dataset (46,000 files, ~5TB total):
-
-| Metric | Time |
-|--------|------|
-| Discovery | ~30 seconds |
-| First result | ~5 seconds |
-| 50% complete | ~20 minutes |
-| 100% complete | ~40 minutes |
-
-**Key Improvement**: Users see results in 5 seconds (vs. 15+ minutes in old batch system)
+The reset also resets `discoveredCount`, `validatedCount`, `filteredCount`,
+`fastProcessedCount`, `backgroundProcessedCount`, clears the
+`ContainerPluginScheduler`, and resets `performanceMetrics`.
 
 ---
 
-## Architecture Decisions
+## Stats and observability
 
-### Decision 1: Streaming vs. Batching
+`StreamingPipeline.getStats()` returns:
 
-**Problem**: Original batch processing had 15-minute discovery time before any processing started.
+- counters: `discovered`, `validated`, `filtered`, `fastProcessed`,
+  `backgroundProcessed`
+- per-queue `{ pending, size }` for validation, fast, background — if a
+  `ContainerPluginScheduler` is attached, the fast / background numbers
+  come from the scheduler's queues (those are the user-meaningful
+  numbers because that's where the plugin work actually runs)
+- `state`: the full `UnifiedProcessingStateManager.getSnapshot()`
 
-**Options Considered**:
-1. **Optimize batch processing** (parallel directory traversal, caching)
-2. **Hybrid approach** (batch discovery with parallel processing)
-3. **Full streaming** (process as discovered)
+These are exposed via the API endpoints registered in
+`src/api/UnifiedAPIServer.ts`:
 
-**Decision**: Full streaming (Option 3)
-
-**Rationale**:
-- **User Experience**: Results appear within seconds
-- **Memory Efficiency**: Bounded queue size prevents memory explosion
-- **Simplicity**: Async generators are easier to reason about than batching logic
-- **Scalability**: Works equally well for 100 files or 1 million files
-
----
-
-### Decision 2: Separate Generic and Application Logic
-
-**Problem**: Original `FolderWatcher` had hardcoded video file extensions, making it non-reusable.
-
-**Options Considered**:
-1. **Keep extension filtering in FolderWatcher** (simple, but not reusable)
-2. **Pass extension filter to FolderWatcher** (more generic, but clutters API)
-3. **Remove all filtering from FolderWatcher** (cleanest separation)
-
-**Decision**: Remove all filtering (Option 3)
-
-**Rationale**:
-- **Reusability**: `meta-hash` can be used for non-media file projects
-- **Single Responsibility**: FolderWatcher does one thing (discover files)
-- **Flexibility**: Application can implement arbitrary filtering logic
-- **Performance**: Minimal overhead (extension check is < 1ms)
+- `GET /api/processing/status` — counts + state snapshot
+- `GET /api/processing/queue` — per-queue depths
+- `GET /api/processing/failed` — failed-file roster (also recorded into
+  `performanceMetrics`)
+- `POST /api/processing/retry` and `POST /api/processing/retry-all`
+- `POST /api/processing/wait-empty` — pauseless wait for the queues to
+  drain (useful in tests)
 
 ---
 
-### Decision 3: Three Separate Queues
+## Key code locations
 
-**Problem**: Single queue with uniform concurrency doesn't match workload characteristics.
-
-**Options Considered**:
-1. **Single queue** (simple, but suboptimal)
-2. **Two queues** (light + hash)
-3. **Three queues** (validation + metadata + hash)
-
-**Decision**: Three queues (Option 3)
-
-**Rationale**:
-- **Validation**: High concurrency (32) keeps up with discovery
-- **Metadata**: Medium concurrency (16) balances FFmpeg overhead
-- **Hash**: Medium concurrency (16) maximizes disk throughput
-- **Independence**: Each stage can progress at its own pace
-- **Observability**: Clear metrics per stage
-
----
-
-### Decision 4: Skip MIME Validation
-
-**Problem**: Extension checking might allow incorrect file types (e.g., `.mkv` file that's actually a text file).
-
-**Options Considered**:
-1. **Always validate MIME type** (accurate, but slow)
-2. **Optional MIME validation** (configurable, but complex)
-3. **Skip MIME validation** (fast, handle errors in later stages)
-
-**Decision**: Skip MIME validation (Option 3)
-
-**Rationale**:
-- **Performance**: MIME validation requires reading 4KB of each file (~25% overhead)
-- **Accuracy**: Extension checking is 99.9% accurate in practice
-- **Error Handling**: FFmpeg will fail gracefully on invalid files
-- **User Control**: Users control watched directories (low risk of wrong extensions)
-
----
-
-### Decision 5: Fire-and-Forget Stage Progression
-
-**Problem**: Should errors in one stage halt processing or be logged and continue?
-
-**Options Considered**:
-1. **Halt on error** (safe, but brittle)
-2. **Retry with backoff** (robust, but complex)
-3. **Log and continue** (fire-and-forget)
-
-**Decision**: Log and continue (Option 3)
-
-**Rationale**:
-- **Resilience**: One corrupt file doesn't stop processing 899,999 good files
-- **Observability**: Errors are logged with full context
-- **Metrics**: Error count tracked in state manager
-- **Manual Recovery**: Failed files can be manually reprocessed via API
-
----
-
-### Decision 6: Async Generator vs. Event Emitter
-
-**Problem**: How should FolderWatcher emit discovered files?
-
-**Options Considered**:
-1. **Event Emitter** (traditional Node.js pattern)
-2. **Callback** (simple, but nested callbacks)
-3. **Async Generator** (modern, composable)
-
-**Decision**: Async Generator (Option 3)
-
-**Rationale**:
-- **Backpressure**: Consumer controls consumption rate via `for await`
-- **Composability**: Can be chained, filtered, transformed with async iterators
-- **Simplicity**: No callback hell, no event listener management
-- **Performance**: Natural event loop yielding prevents blocking
-
-```typescript
-// ✅ Async Generator (Clean)
-for await (const file of folderWatcher.discoverFiles([...])) {
-    await processFile(file);
-}
-
-// ❌ Event Emitter (More boilerplate)
-folderWatcher.on('file', async (file) => {
-    await processFile(file);
-});
-folderWatcher.on('end', () => {
-    console.log('Discovery complete');
-});
-folderWatcher.start([...]);
-```
-
----
-
-## Appendix: Key Code Locations
-
-| Component | File Path | Lines | Description |
-|-----------|-----------|-------|-------------|
-| FolderWatcher | `packages/meta-hash/src/lib/folder-watcher/FolderWatcher.ts` | 170 | Generic file discovery |
-| StreamingPipeline | `packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/StreamingPipeline.ts` | 237 | Multi-stage orchestrator |
-| PipelineConfig | `packages/meta-sort/packages/meta-sort-core/src/logic/pipeline/PipelineConfig.ts` | 62 | Configuration interface |
-| StateManager | `packages/meta-sort/packages/meta-sort-core/src/logic/UnifiedProcessingStateManager.ts` | 214 | State tracking |
-| SupportedFileTypes | `packages/meta-sort/packages/meta-sort-core/src/config/SupportedFileTypes.ts` | 57 | Extension configuration |
-| Main Entry | `packages/meta-sort/packages/meta-sort-core/src/index.ts` | 109 | Pipeline initialization |
-
----
-
-## Glossary
-
-- **Async Generator**: JavaScript function that returns an async iterable (uses `async function*` and `yield`)
-- **Backpressure**: Flow control mechanism that prevents fast producers from overwhelming slow consumers
-- **Event Loop**: Node.js single-threaded event processing loop (must not be blocked by long synchronous operations)
-- **Fire-and-Forget**: Pattern where a function is called without awaiting its result (errors handled separately)
-- **PQueue**: Third-party library for promise-based concurrency control (limits simultaneous async operations)
-- **Streaming**: Processing data incrementally as it arrives (vs. batching, which waits for all data)
-
----
-
-## References
-
-- [Node.js Async Iterators](https://nodejs.org/api/esm.html#esm_async_iterators)
-- [p-queue Documentation](https://github.com/sindresorhus/p-queue)
-- [chokidar File Watching](https://github.com/paulmillr/chokidar)
-- [FFmpeg Documentation](https://ffmpeg.org/documentation.html)
-- [etcd Key-Value Store](https://etcd.io/docs/)
+| Component | File |
+|-----------|------|
+| Pipeline orchestrator | `src/logic/pipeline/StreamingPipeline.ts` |
+| Pipeline config | `src/logic/pipeline/PipelineConfig.ts` |
+| State manager | `src/logic/UnifiedProcessingStateManager.ts` |
+| File processor (light/hash phases) | `src/logic/WatchedFileProcessor.ts`, `src/logic/fileProcessor/` |
+| SSE subscriber | `src/events/FileEventConsumer.ts` |
+| SSE transport + cursor | `src/events/SSEEventClient.ts` |
+| Container plugin dispatch | `src/container-plugins/ContainerPluginScheduler.ts` |
+| Extension allow-list | `src/config/SupportedFileTypes.ts` |
+| Concurrency defaults / startup wiring | `src/index.ts` |
+| API endpoints | `src/api/UnifiedAPIServer.ts` |
