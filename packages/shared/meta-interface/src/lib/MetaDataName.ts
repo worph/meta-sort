@@ -4,13 +4,10 @@ export const FileMetaDataName = [
     "byteSize",
 ]
 
+// Sibling CIDs are stored as the bare-CID key-set `cids/<cid>` (see HashMeta),
+// not as per-algorithm cid_* fields. The single member prefix is `cids`.
 export const hashMetaDataName = [
-    "cid_crc32",
-    "cid_md5",
-    "cid_sha1",
-    "cid_sha2-256",
-    "cid_sha3-256",
-    "cid_sha3_384",
+    "cids",
 ];
 
 export const AnimeMetaData = [

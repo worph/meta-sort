@@ -41,13 +41,10 @@ export interface FileMetadata {
   collectionnumber?: number;
   criticrating?: number;
 
-  // Hashes
-  cid_crc32?: string;
-  cid_md5?: string;
-  cid_sha1?: string;
-  'cid_sha2-256'?: string;
-  'cid_sha3-256'?: string;
-  cid_sha3_384?: string;
+  // Sibling CIDs are the bare-CID key-set `cids/<cid> = "true"` (dynamic
+  // keys), not per-algorithm fields. Accessed via prefix-scan; the algorithm
+  // is recovered from each CID's multicodec. See METADATA_KEYS.md §2/§14.13.
+  [cidsKey: `cids/${string}`]: string | undefined;
 
   // Video info
   video?: {

@@ -365,27 +365,99 @@ function hasKeyWithPrefix(obj: any, prefix: string, currentPath: string = ''): b
   return false;
 }
 
+// Human label per multihash code / CID codec. Source of truth for codes:
+// meta-hash MultiHashData + METADATA_KEYS.md §2.
+const CID_LABELS: Record<number, string> = {
+  0x12: 'SHA-256',
+  0x16: 'SHA3-256',
+  0x15: 'SHA3-384',
+  0x11: 'SHA-1',
+  0xd5: 'MD5',
+  0x132: 'CRC32',
+  0x1000: 'MidHash256',
+  0x10b7: 'BitTorrent v2',
+  0xb702: 'BT Pieces Root',
+  0x1001: 'BitTorrent v1 (file)',
+  0x1002: 'BitTorrent v2 (file)',
+};
+
+const RANK_BY_LABEL: Record<string, number> = {
+  'SHA-256': 5, 'SHA3-256': 5, 'SHA3-384': 5,
+  'BitTorrent v2': 4, 'BitTorrent v1 (file)': 4, 'BitTorrent v2 (file)': 4,
+  MidHash256: 3, 'SHA-1': 2, MD5: 2, CRC32: 2,
+};
+
+const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
+
+function decodeBase32(s: string): Uint8Array | null {
+  let bits = 0, value = 0;
+  const out: number[] = [];
+  for (const ch of s) {
+    const idx = B32.indexOf(ch);
+    if (idx < 0) return null;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((value >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function readUvarint(buf: Uint8Array, pos: number): [number, number] {
+  let result = 0, shift = 0, p = pos;
+  while (p < buf.length) {
+    const b = buf[p++];
+    result |= (b & 0x7f) << shift;
+    if ((b & 0x80) === 0) return [result >>> 0, p];
+    shift += 7;
+  }
+  return [0, pos];
+}
+
 /**
- * Extract all hash values (cid_*) from metadata
+ * Decode a bare multibase-base32 CIDv1 into [codec, multihashCode], or null.
+ * The algorithm is recovered from these — sibling CIDs are stored as a
+ * key-set (cids/<cid>) with no per-algorithm field name.
+ */
+function decodeCid(cid: string): { codec: number; mh: number } | null {
+  if (!cid.startsWith('b')) return null;
+  const bytes = decodeBase32(cid.slice(1));
+  if (!bytes || bytes.length < 3) return null;
+  let v: number, pos = 0;
+  [v, pos] = readUvarint(bytes, pos);
+  if (v !== 1) return null;
+  let codec: number;
+  [codec, pos] = readUvarint(bytes, pos);
+  let mh: number;
+  [mh, pos] = readUvarint(bytes, pos);
+  return { codec, mh };
+}
+
+function cidLabel(cid: string): string {
+  const d = decodeCid(cid);
+  if (!d) return 'CID';
+  // Per-file BitTorrent codecs are carried on the CID codec, not the mh code.
+  return CID_LABELS[d.codec] ?? CID_LABELS[d.mh] ?? 'CID';
+}
+
+/**
+ * Extract all sibling CIDs from the record's bare-CID key-set (cids/<cid>),
+ * labelling each by its multicodec. Replaces the old per-algorithm cid_*
+ * fields. See METADATA_KEYS.md §2/§14.13.
  */
 function getHashValues(metadata: FileMetadata): { key: string; label: string; value: string }[] {
-  const hashOrder = [
-    { key: 'cid_sha2-256', label: 'SHA-256' },
-    { key: 'cid_sha3-256', label: 'SHA3-256' },
-    { key: 'cid_sha3-384', label: 'SHA3-384' },
-    { key: 'cid_sha1', label: 'SHA-1' },
-    { key: 'cid_md5', label: 'MD5' },
-    { key: 'cid_crc32', label: 'CRC32' },
-    { key: 'cid_btih_v2', label: 'BitTorrent v2' },
-  ];
-
-  return hashOrder
-    .filter(({ key }) => (metadata as any)[key])
-    .map(({ key, label }) => ({
-      key,
-      label,
-      value: (metadata as any)[key],
-    }));
+  const out: { key: string; label: string; value: string }[] = [];
+  for (const key of Object.keys(metadata as any)) {
+    if (!key.startsWith('cids/')) continue;
+    const cid = key.slice('cids/'.length);
+    if (!cid) continue;
+    out.push({ key, label: cidLabel(cid), value: cid });
+  }
+  // Most useful first (sha/ipfs > btih > midhash > weak digests), then by label.
+  out.sort((a, b) => (RANK_BY_LABEL[b.label] ?? 0) - (RANK_BY_LABEL[a.label] ?? 0) || a.label.localeCompare(b.label));
+  return out;
 }
 
 /**

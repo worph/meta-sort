@@ -1,32 +1,23 @@
 /**
- * HashMeta - Content identification hashes
+ * HashMeta - Content identification hashes.
  *
- * Primary Global ID: cid_midhash256 (SHA-256 hash of middle 1MB + file size)
- * - Format: CID v1 with custom multicodec 0x1000
- * - Example: bafkr4ih5kapbjzqvmj7jxr... (base32 CID encoding)
+ * Sibling CIDs are NOT stored as per-algorithm fields anymore. Every digest
+ * of the file (sha2-256, sha1, md5, crc32, sha3-*, midhash256, btih-v2, …)
+ * lives in a single bare-CID key-set on the record:
  *
- * Legacy IDs: cid_sha2-256, cid_sha1 (computed optionally for compatibility)
+ *     cids/<cidV1> = "true"
  *
- * Migration Note: cid_midhash256 is the new primary identifier replacing full SHA-256.
- * Old hashes remain for backward compatibility and external system integration.
- * All CIDs now use proper CID v1 format (IPFS-compatible structure).
+ * A CIDv1 is self-describing — its algorithm is the multicodec — so there is
+ * no per-algorithm field name and no `<algo>:` prefix. The canonical /
+ * network CID is derived by rank from this set on read, never stored. The
+ * midhash stays the file's address (hashId). See METADATA_KEYS.md §2/§14.13.
+ *
+ * Because the members are dynamic keys (`cids/<cid>`), they can't be typed as
+ * named fields here; consumers read them by prefix-scanning the flat record
+ * and recover the algorithm from each CID's multicodec.
  */
 export interface HashMeta {
-    cid_crc32?: string; //0x0132 CRC32 (SFV)
-    cid_md5?: string; // 0xd5 md5
-    cid_sha1?: string; // 0x11 sha1
-    "cid_sha2-256"?: string;//0x12 sha2-256
-    "cid_sha3-256"?: string; // 0x16 sha3-256
-    "cid_sha3_384"?: string; // 0x16 sha3-256
-    cid_midhash256?: string; // 0x1000 midhash256 (CID v1 format with custom multicodec)
+    // Intentionally empty: sibling CIDs are the `cids/<cid>` key-set (above),
+    // not typed fields. Kept as a named type so existing `extends HashMeta`
+    // composition sites stay valid.
 }
-
-export const HashMetaFields = [
-    "cid_crc32",
-    "cid_md5",
-    "cid_sha1",
-    "cid_sha2-256",
-    "cid_sha3-256",
-    "cid_sha3_384",
-    "cid_midhash256",
-];

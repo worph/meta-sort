@@ -59,7 +59,16 @@ export class MetaCoreApiWriter {
         for (const pair of pairs) {
             // pair.key is "file:<hash>/<field>"; strip the prefix+slash.
             const field = pair.key.slice(prefix.length + 1);
-            if (field) {
+            if (!field) continue;
+            // Sibling CIDs are stored as a bare-CID key-set (cids/<cid> =
+            // "true"), never as per-algorithm cid_* fields. Rewrite any
+            // legacy cid_* field (e.g. the in-memory cid_midhash256 primary
+            // id) into the key-set form so no deprecated field ever reaches a
+            // record. The CID is self-describing, so the algorithm in the
+            // field name is dropped. See METADATA_KEYS.md §2/§14.13.
+            if (field.startsWith('cid_') && pair.value) {
+                flat[`cids/${pair.value}`] = 'true';
+            } else {
                 flat[field] = pair.value;
             }
         }

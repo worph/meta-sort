@@ -18,4 +18,14 @@ export type ProcessingStatus = 'pending' | 'processing' | 'complete' | 'error';
 export interface FileMetadata extends HashMeta {
   /** Current status of file processing */
   processingStatus?: ProcessingStatus;
+
+  /**
+   * In-memory primary identifier: the file's midhash256 CID, computed in the
+   * light phase and used as the record address (hashId) throughout meta-sort.
+   * This is an in-process working field only — it is persisted to the record
+   * as a `cids/<cid>` key-set member (by the meta-core watcher and the KV
+   * writer's cid_* → cids/ transform), never as a named `cid_midhash256`
+   * field. See METADATA_KEYS.md §1/§14.13.
+   */
+  cid_midhash256?: string;
 }

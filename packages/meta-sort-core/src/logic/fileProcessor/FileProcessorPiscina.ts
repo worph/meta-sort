@@ -296,19 +296,16 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
             metadata.processingStatus = 'complete';
             this.database.set(filePath, metadata);
 
-            // STEP 5: Update metadata in KV with full hashes
+            // STEP 5: Update metadata in KV.
+            // Full hashes (sha2-256, sha1, …) are computed by the full-hash
+            // container plugin and written to meta-core directly as cids/<cid>
+            // members — they are not held in this in-memory metadata. The
+            // midhash256 is the primary id; on a (rare) midhash collision the
+            // file simply shares the record address until the plugin's
+            // distinct cids/* members disambiguate it.
             if (this.kvClient) {
                 try {
-                    // Choose hash ID: Use SHA-256 if collision detected, otherwise midhash256
-                    let hashId: string;
-                    if (collisionDetected && metadata['cid_sha2-256']) {
-                        // Collision: Use full SHA-256 as primary ID
-                        hashId = metadata['cid_sha2-256'];
-                        console.log(`   Using SHA-256 as primary ID for collision: ${hashId}`);
-                    } else {
-                        // Normal: Use midhash256 as primary ID
-                        hashId = midHash256;
-                    }
+                    const hashId = midHash256;
 
                     if (hashId) {
                         // Prepare metadata with filePath added
@@ -625,7 +622,7 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
         // Delete from KV if configured (using nested key architecture)
         if (this.kvClient && metadata) {
             try {
-                const hashId = metadata.cid_midhash256 || metadata['cid_sha2-256'] || metadata.cid_sha1 || metadata.cid_md5;
+                const hashId = metadata.cid_midhash256;
 
                 // Delete all properties for this file using nested key architecture
                 if (hashId) {
