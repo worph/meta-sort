@@ -102,13 +102,18 @@ export interface ExtendedHashMeta extends HashMeta {
  */
 export interface IndexManager {
     /**
-     * Get cached CID for a file based on path, size, and mtime
+     * Get cached CID for a file based on path, size, and mtime.
+     *
+     * Structural mirror of meta-hash's `HashIndexManager`. Its columns are keyed
+     * by bare **algorithm** (`midhash256`, `sha256`), not by the removed
+     * `cid_<algo>` record-field names — the local index and the record shape are
+     * deliberately separate concerns now. See METADATA_KEYS.md §14.13.
      */
     getCidForFile(
         path: string,
         size: number,
         mtime: string
-    ): { cid_midhash256?: string } | undefined;
+    ): { midhash256?: string } | undefined;
 
     /**
      * Add a file CID to the cache
@@ -117,7 +122,7 @@ export interface IndexManager {
         path: string,
         size: number,
         mtime: string,
-        cid: { cid_midhash256: string }
+        cid: { midhash256: string }
     ): void;
 }
 

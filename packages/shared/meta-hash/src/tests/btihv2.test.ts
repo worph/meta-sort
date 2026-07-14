@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {BtihV2Hasher} from '../lib/file-id/BtihV2Hasher';
-import {CID_ALGORITHM_NAMES, HashComputerWorker} from "../lib";
+import {HashComputerWorker, pickCidByAlgorithm} from "../lib";
 import {readFile} from 'fs/promises';
 import {createHash} from 'crypto';
 import * as process from "process";
@@ -157,26 +157,20 @@ describe('BitTorrent v2 Info Hash (BEP 52)', () => {
     });
 
     it('should integrate with HashComputerWorker', async () => {
-        const hashComputer = new HashComputerWorker([
-            CID_ALGORITHM_NAMES.btih_v2,
-            CID_ALGORITHM_NAMES.sha256
-        ]);
+        const hashComputer = new HashComputerWorker(['btih_v2', 'sha256']);
 
         const metadata: any = {};
         await hashComputer.computeMissingHash('./src/tests/test.txt', metadata);
 
-        console.log('Computed metadata:', metadata);
+        // The digests land in a bare CID list; each is recovered by its
+        // multicodec, not by a field name.
+        const btih = pickCidByAlgorithm(metadata.cids, 'btih_v2');
+        expect(btih).toBeDefined();
+        expect(typeof btih).toBe('string');
+        expect(btih!.startsWith('b')).toBe(true);
 
-        // Verify btih_v2 CID was computed
-        expect(metadata).toHaveProperty('cid_btih_v2');
-        expect(typeof metadata.cid_btih_v2).toBe('string');
-        expect(metadata.cid_btih_v2.length).toBeGreaterThan(0);
-
-        // Verify CID format (should start with 'b' for base32 CIDv1)
-        expect(metadata.cid_btih_v2.startsWith('b')).toBe(true);
-
-        // Should also have SHA-256 for comparison
-        expect(metadata).toHaveProperty('cid_sha2-256');
+        // Should also have SHA-256 for comparison.
+        expect(pickCidByAlgorithm(metadata.cids, 'sha256')).toBeDefined();
     });
 
     it('should compute piece length correctly', () => {
@@ -213,15 +207,16 @@ describe('BitTorrent v2 Info Hash (BEP 52)', () => {
     });
 
     it('should produce valid CID format with codec 0x10B7', async () => {
-        const hashComputer = new HashComputerWorker([
-            CID_ALGORITHM_NAMES.btih_v2
-        ]);
+        const hashComputer = new HashComputerWorker(['btih_v2']);
 
         const metadata: any = {};
         await hashComputer.computeMissingHash('./src/tests/test.txt', metadata);
 
-        const cid = metadata.cid_btih_v2;
-        console.log('BitTorrent v2 CID:', cid);
+        const cid = pickCidByAlgorithm(metadata.cids, 'btih_v2');
+
+        // The selector proves the codec: pickCidByAlgorithm('btih_v2') matches on
+        // multihash 0x10B7, so a hit here IS the "valid CID with codec 0x10B7"
+        // assertion this test is named for.
 
         // Verify CID format
         expect(cid).toBeDefined();

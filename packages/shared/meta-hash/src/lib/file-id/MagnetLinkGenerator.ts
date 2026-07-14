@@ -1,4 +1,5 @@
 import {MultiHashData} from '../hash-compute/MultiHashData';
+import {pickCidByAlgorithm} from './CidDecode';
 import {CID} from 'multiformats/cid';
 
 /**
@@ -22,13 +23,13 @@ export class MagnetLinkGenerator {
     /**
      * Generate BitTorrent v2 magnet link from metadata
      *
-     * @param metadata - File metadata containing cid_btih_v2
+     * @param metadata - File metadata whose `cids` include a btih-v2 CID
      * @param fileName - Original filename for display name
      * @param fileSize - File size in bytes
      * @returns Magnet link string, or null if btih_v2 not available
      *
      * @example
-     * const metadata = {cid_btih_v2: 'bafyb...'};
+     * const metadata = {cids: ['bafyb...']};
      * const magnet = MagnetLinkGenerator.generate(metadata, 'video.mp4', 1024000);
      * // Returns: magnet:?xt=urn:btmh:1220abc...&dn=video.mp4&xl=1024000
      */
@@ -37,7 +38,9 @@ export class MagnetLinkGenerator {
         fileName: string,
         fileSize: number
     ): string | null {
-        const cidString = metadata.cid_btih_v2;
+        // The btih-v2 CID is recovered from the bare list by its multicodec
+        // (0x10B7), not by a field name. See CidDecode.ts.
+        const cidString = pickCidByAlgorithm(metadata.cids, 'btih_v2');
         if (!cidString) {
             return null; // BitTorrent v2 hash not computed
         }
@@ -178,6 +181,6 @@ export class MagnetLinkGenerator {
         fileName: string,
         fileSize: number
     ): string | null {
-        return this.generate({cid_btih_v2: cidString}, fileName, fileSize);
+        return this.generate({cids: [cidString]}, fileName, fileSize);
     }
 }

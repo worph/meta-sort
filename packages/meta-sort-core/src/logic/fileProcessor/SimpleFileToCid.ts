@@ -1,4 +1,4 @@
-import {CID_ALGORITHM_NAMES, HashComputerFile} from "@metazla/meta-hash";
+import {CidAlgorithm, HashComputerFile, MultiHashData, pickCidByAlgorithm} from "@metazla/meta-hash";
 import {HashIndexManager} from "@metazla/meta-hash";
 import {config} from "../../config/EnvConfig.js";
 import {targetHash, targetHashForIndex} from "../../config/TargetHash.js";
@@ -16,15 +16,30 @@ class SimpleFileToCid{
             if (!stats || !stats.exists) {
                 return null;
             }
-            let indexLine = globalHashIndex.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
-            if(indexLine) {
-                return indexLine[CID_ALGORITHM_NAMES.sha256];
-            }else {
-                let hashs = {};
-                await globalHashComputer.computeMissingHash(filePath, hashs);
-                globalHashIndex.addFileCid(filePath, stats.size, stats.mtime.toISOString(), hashs);
-                return hashs[CID_ALGORITHM_NAMES.sha256];
+            const indexLine = globalHashIndex.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
+            if (indexLine) {
+                // The on-disk index keeps per-algorithm columns, keyed by bare
+                // algorithm name (not the removed `cid_<algo>` record fields).
+                return indexLine['sha256'] ?? null;
             }
+
+            // The computer returns bare CIDs; the algorithm is recovered from the
+            // multicodec, never from a field name.
+            const hashes: MultiHashData = {};
+            await globalHashComputer.computeMissingHash(filePath, hashes);
+
+            const columns: Partial<Record<CidAlgorithm, string>> = {};
+            for (const algo of targetHash) {
+                const cid = pickCidByAlgorithm(hashes.cids, algo);
+                if (cid) {
+                    columns[algo] = cid;
+                }
+            }
+            if (Object.keys(columns).length > 0) {
+                globalHashIndex.addFileCid(filePath, stats.size, stats.mtime.toISOString(), columns);
+            }
+
+            return pickCidByAlgorithm(hashes.cids, 'sha256') ?? null;
         } catch (e) {
             return null;
         }

@@ -15,7 +15,7 @@
  * Reads and stream consumption stay on Redis in PR B; PR C migrates those.
  */
 import {
-    flattenMetadata,
+    buildRecordFields,
     buildFilePrefix,
 } from './MetadataUtils.js';
 
@@ -48,30 +48,12 @@ export class MetaCoreApiWriter {
         metadata: any,
         excludeFields: string[] = []
     ): Promise<void> {
-        // Reuse the same flattening logic the Redis path used so the wire
-        // payload matches what handler.MergeMetadataFlat expects (flat map
-        // of "a/b/c" → string value).
-        const prefix = buildFilePrefix(hashId);
-        const pairs = flattenMetadata(metadata, prefix, excludeFields);
-        if (pairs.length === 0) return;
-
-        const flat: Record<string, string> = {};
-        for (const pair of pairs) {
-            // pair.key is "file:<hash>/<field>"; strip the prefix+slash.
-            const field = pair.key.slice(prefix.length + 1);
-            if (!field) continue;
-            // Sibling CIDs are stored as a bare-CID key-set (cids/<cid> =
-            // "true"), never as per-algorithm cid_* fields. Rewrite any
-            // legacy cid_* field (e.g. the in-memory cid_midhash256 primary
-            // id) into the key-set form so no deprecated field ever reaches a
-            // record. The CID is self-describing, so the algorithm in the
-            // field name is dropped. See METADATA_KEYS.md §2/§14.13.
-            if (field.startsWith('cid_') && pair.value) {
-                flat[`cids/${pair.value}`] = 'true';
-            } else {
-                flat[field] = pair.value;
-            }
-        }
+        // `buildRecordFields` is the single write-shape boundary, shared with the
+        // direct-Redis path in RedisClient. It emits the `cids/<cid>` key-set and
+        // never a per-algorithm `cid_*` field — which meta-core would now reject
+        // with a 400 anyway.
+        const flat = buildRecordFields(metadata, excludeFields);
+        if (Object.keys(flat).length === 0) return;
 
         await this.fetchJson('PATCH', `/meta/${encodeURIComponent(hashId)}`, flat);
     }

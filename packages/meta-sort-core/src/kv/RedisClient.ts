@@ -16,7 +16,7 @@ import * as IORedis from 'ioredis';
 import * as os from 'os';
 import type { IKVClient, KeyValuePair } from './IKVClient.js';
 import {
-    flattenMetadata,
+    buildRecordFields,
     reconstructMetadata,
     buildFilePrefix,
     buildPropertyKey,
@@ -331,24 +331,24 @@ export class RedisKVClient implements IKVClient {
             return this.writer.setMetadataFlat(hashId, metadata, excludeFields);
         }
 
-        const prefix = buildFilePrefix(hashId);
-        const pairs = flattenMetadata(metadata, prefix, excludeFields);
-
-        if (pairs.length === 0) return;
+        // Direct-Redis fallback (no metaCoreApiUrl configured — see KVManager).
+        //
+        // This path used to flatten the metadata itself, which meant it skipped
+        // the `cid_* → cids/` transform that only the HTTP writer applied: it
+        // wrote a literal `file:<hash>/cid_midhash256` key. meta-core's
+        // reverse-index hook only registers aliases for fields named `cids/<cid>`,
+        // so those records were stored but never indexed — unresolvable by their
+        // own midhash, with nothing logged. Both paths now build the record
+        // through the same `buildRecordFields`, so the key-set cannot be skipped.
+        const flat = buildRecordFields(metadata, excludeFields);
+        if (Object.keys(flat).length === 0) return;
 
         // Use pipeline for efficient batch SET operations
         const pipeline = this.redis.pipeline();
-
-        for (const pair of pairs) {
-            // Extract field name by removing the prefix
-            const field = pair.key.slice(prefix.length + 1); // +1 for trailing /
-            if (field) {
-                // Key format: file:{hashId}/{property}
-                const redisKey = this.buildKey(`file:${hashId}/${field}`);
-                pipeline.set(redisKey, pair.value);
-            }
+        for (const [field, value] of Object.entries(flat)) {
+            // Key format: file:{hashId}/{property}
+            pipeline.set(this.buildKey(`file:${hashId}/${field}`), value);
         }
-
         await pipeline.exec();
 
         // Maintain index set for getAllHashIds

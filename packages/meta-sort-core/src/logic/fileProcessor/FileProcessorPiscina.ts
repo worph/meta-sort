@@ -191,9 +191,9 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
             let midHash256: string | undefined;
             const indexLine = this.indexManager.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
 
-            if (indexLine && indexLine.cid_midhash256) {
+            if (indexLine && indexLine.midhash256) {
                 // Cache hit! Use cached midhash256 (no network I/O needed)
-                midHash256 = indexLine.cid_midhash256;
+                midHash256 = indexLine.midhash256;
                 performanceMetrics.recordCacheHit('midhash256');
             } else {
                 // Cache miss - compute midhash256 (< 1 second, but requires network I/O on network drives)
@@ -203,16 +203,22 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 const computeTime = Math.ceil(performance.now() - computeStart);
 
                 // Record midhash256 computation time (excludes cache hits)
-                performanceMetrics.recordHashComputation('cid_midhash256', computeTime);
+                performanceMetrics.recordHashComputation('midhash256', computeTime);
                 performanceMetrics.recordCacheMiss('midhash256');
 
                 // Store in cache for future lookups
-                this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
+                this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { midhash256: midHash256 });
             }
 
-            // Initialize metadata with midhash256
+            // Initialize metadata with midhash256.
+            //
+            // Two roles, now named separately: the record address (`hashId`, the
+            // `/file/{hashId}` key) and a member of the record's bare-CID key-set
+            // (`cids`). The old single `cid_midhash256` property conflated them and
+            // leaked a deprecated field name onto the record. See METADATA_KEYS.md §14.13.
             const metadata: FileMetadata = {
-                cid_midhash256: midHash256,
+                hashId: midHash256,
+                cids: [midHash256],
                 processingStatus: 'processing'
             };
 
@@ -409,9 +415,9 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 // Check cache or compute locally
                 const indexLine = this.indexManager.getCidForFile(filePath, stats.size, stats.mtime.toISOString());
 
-                if (indexLine && indexLine.cid_midhash256) {
+                if (indexLine && indexLine.midhash256) {
                     // Cache hit! Use cached midhash256 (no network I/O needed)
-                    midHash256 = indexLine.cid_midhash256;
+                    midHash256 = indexLine.midhash256;
                     performanceMetrics.recordCacheHit('midhash256');
                 } else {
                     // Cache miss - compute midhash256 locally (requires file access)
@@ -423,17 +429,23 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                     const computeTime = Math.ceil(performance.now() - computeStart);
 
                     // Record midhash256 computation time (excludes cache hits)
-                    performanceMetrics.recordHashComputation('cid_midhash256', computeTime);
+                    performanceMetrics.recordHashComputation('midhash256', computeTime);
                     performanceMetrics.recordCacheMiss('midhash256');
 
                     // Store in cache for future lookups
-                    this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { cid_midhash256: midHash256 });
+                    this.indexManager.addFileCid(filePath, stats.size, stats.mtime.toISOString(), { midhash256: midHash256 });
                 }
             }
 
-            // Initialize metadata with midhash256
+            // Initialize metadata with midhash256.
+            //
+            // Two roles, now named separately: the record address (`hashId`, the
+            // `/file/{hashId}` key) and a member of the record's bare-CID key-set
+            // (`cids`). The old single `cid_midhash256` property conflated them and
+            // leaked a deprecated field name onto the record. See METADATA_KEYS.md §14.13.
             const metadata: FileMetadata = {
-                cid_midhash256: midHash256,
+                hashId: midHash256,
+                cids: [midHash256],
                 processingStatus: 'processing'
             };
 
@@ -524,7 +536,7 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
                 throw new Error('Metadata not found - light processing may have failed');
             }
 
-            const midHash256 = metadata.cid_midhash256;
+            const midHash256 = metadata.hashId;
             if (!midHash256) {
                 throw new Error('midhash256 not found in metadata');
             }
@@ -622,7 +634,7 @@ export class FileProcessorPiscina implements FileAnalyzerInterface{
         // Delete from KV if configured (using nested key architecture)
         if (this.kvClient && metadata) {
             try {
-                const hashId = metadata.cid_midhash256;
+                const hashId = metadata.hashId;
 
                 // Delete all properties for this file using nested key architecture
                 if (hashId) {

@@ -282,8 +282,8 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                 );
 
                 let midHash256: string;
-                if (indexLine?.cid_midhash256) {
-                    midHash256 = indexLine.cid_midhash256;
+                if (indexLine?.midhash256) {
+                    midHash256 = indexLine.midhash256;
                     performanceMetrics.recordCacheHit('midhash256');
                 } else {
                     const computeStart = performance.now();
@@ -297,7 +297,7 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                         return;
                     }
                     midHash256 = hash;
-                    performanceMetrics.recordHashComputation('cid_midhash256', Math.ceil(performance.now() - computeStart));
+                    performanceMetrics.recordHashComputation('midhash256', Math.ceil(performance.now() - computeStart));
                     performanceMetrics.recordCacheMiss('midhash256');
 
                     // Store in cache for future lookups
@@ -305,13 +305,20 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                         filePath,
                         fileStats.size,
                         fileStats.mtime.toISOString(),
-                        { cid_midhash256: midHash256 }
+                        { midhash256: midHash256 }
                     );
                 }
 
-                // STEP 2: Initialize metadata with midhash256
+                // STEP 2: Initialize metadata with midhash256.
+                //
+                // The midhash plays two roles and now says so: it is the record
+                // address (`hashId`, the `/file/{hashId}` key) *and* one member of
+                // the record's bare-CID key-set (`cids`). It used to be a single
+                // `cid_midhash256` property, which conflated the two and leaked a
+                // deprecated field name onto the record. See METADATA_KEYS.md §14.13.
                 const metadata: any = {
-                    cid_midhash256: midHash256,
+                    hashId: midHash256,
+                    cids: [midHash256],
                     filePath,
                     processingStatus: 'processing'
                 };
@@ -441,8 +448,8 @@ export class WatchedFileProcessor implements FileProcessorInterface {
                     const metadata = db.get(filePath);
 
                     // Collect hashId before deletion (for Stremio notification)
-                    if (metadata && metadata.cid_midhash256) {
-                        removedHashIds.push(metadata.cid_midhash256);
+                    if (metadata && metadata.hashId) {
+                        removedHashIds.push(metadata.hashId);
                     }
 
                     db.delete(filePath);

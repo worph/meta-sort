@@ -166,14 +166,14 @@ export class StreamingPipeline {
 
             // After light processing, dispatch to plugins and queue background tasks
             const metadata = this.config.fileProcessor.getDatabase().get(filePath);
-            if (metadata && metadata.cid_midhash256) {
+            if (metadata && metadata.hashId) {
                 // Notify Stremio addon to add video
-                this.notifyStremioAdd(metadata.cid_midhash256).catch(err => {
+                this.notifyStremioAdd(metadata.hashId).catch(err => {
                     // Silent fail - Stremio addon may not be running
                 });
 
                 // Dispatch tasks to container plugins (fire and forget)
-                this.dispatchContainerPluginTasks(filePath, metadata.cid_midhash256, metadata);
+                this.dispatchContainerPluginTasks(filePath, metadata.hashId, metadata);
 
                 // Stage 3: Queue for background processing (SHA-256 computation)
                 this.backgroundQueue.add(() => this.processHashPhase(filePath))
@@ -246,7 +246,7 @@ export class StreamingPipeline {
             // Otherwise, wait for 'file:complete' event from ContainerPluginScheduler.
             if (!this.config.containerPluginScheduler) {
                 const metadata = this.config.fileProcessor.getDatabase().get(filePath);
-                const hashId = metadata?.cid_midhash256;
+                const hashId = metadata?.hashId;
                 let virtualPath: string | undefined;
                 try {
                     virtualPath = metadata ? this.config.metaDataToFolderStruct.renamingRule(metadata as any, filePath) : undefined;

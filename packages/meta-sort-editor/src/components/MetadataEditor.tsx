@@ -375,16 +375,32 @@ const CID_LABELS: Record<number, string> = {
   0xd5: 'MD5',
   0x132: 'CRC32',
   0x1000: 'MidHash256',
-  0x10b7: 'BitTorrent v2',
   0xb702: 'BT Pieces Root',
+  0x70: 'IPFS (dag-pb)',
+  0x10b7: 'BitTorrent v2',
   0x1001: 'BitTorrent v1 (file)',
   0x1002: 'BitTorrent v2 (file)',
+  0x1005: 'Usenet release',
+  0x1006: 'URL',
 };
 
+/**
+ * Display order for a record's CIDs. This mirrors the canonical rank ladder
+ * (`packages/meta-core/internal/cid/rank.go`, the two `cid_rank.rs`, and the
+ * `/cid-rank-vectors.json` golden fixture) — same ordering, scaled down.
+ *
+ * It used to be its own invented ladder (5/4/3/2) with no dag-pb entry at all,
+ * which meant an IPFS root fell through to 0 and sorted *below* MD5. Display-only,
+ * so it never broke anything — but it was a seventh, silently divergent copy of a
+ * rule that already has too many. Keep it in step: a code with no entry sorts last.
+ */
 const RANK_BY_LABEL: Record<string, number> = {
+  'IPFS (dag-pb)': 6,
   'SHA-256': 5, 'SHA3-256': 5, 'SHA3-384': 5,
   'BitTorrent v2': 4, 'BitTorrent v1 (file)': 4, 'BitTorrent v2 (file)': 4,
-  MidHash256: 3, 'SHA-1': 2, MD5: 2, CRC32: 2,
+  MidHash256: 3,
+  'Usenet release': 2, URL: 2,
+  'SHA-1': 1, MD5: 1, CRC32: 1,
 };
 
 const B32 = 'abcdefghijklmnopqrstuvwxyz234567';

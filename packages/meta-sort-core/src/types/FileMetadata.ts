@@ -20,12 +20,26 @@ export interface FileMetadata extends HashMeta {
   processingStatus?: ProcessingStatus;
 
   /**
-   * In-memory primary identifier: the file's midhash256 CID, computed in the
-   * light phase and used as the record address (hashId) throughout meta-sort.
-   * This is an in-process working field only — it is persisted to the record
-   * as a `cids/<cid>` key-set member (by the meta-core watcher and the KV
-   * writer's cid_* → cids/ transform), never as a named `cid_midhash256`
-   * field. See METADATA_KEYS.md §1/§14.13.
+   * The record address: the file's midhash256 CID, computed in the light phase
+   * and used as the `hashId` throughout meta-sort and as the key of the
+   * `/file/{hashId}` record.
+   *
+   * This replaces the old `cid_midhash256` field. The rename is the point: that
+   * name was a *metadata property* name, and it leaked — a `cid_*` field written
+   * to a record is stored but never reverse-indexed by meta-core, leaving the
+   * record unresolvable by its own CID. meta-core now rejects such fields with a
+   * 400. See METADATA_KEYS.md §1/§14.13.
    */
-  cid_midhash256?: string;
+  hashId?: string;
+
+  /**
+   * Every digest known for this file, as **bare CIDv1 strings** — the midhash
+   * included. Persisted as the key-set `cids/<cid> = "true"`, which is the only
+   * shape meta-core indexes.
+   *
+   * A CIDv1 is self-describing, so a specific digest is recovered by decoding
+   * the multicodec (`pickCidByAlgorithm` from `@metazla/meta-hash`), never by a
+   * field name.
+   */
+  cids?: string[];
 }

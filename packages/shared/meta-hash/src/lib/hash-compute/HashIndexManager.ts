@@ -5,11 +5,28 @@ import {stringify} from 'csv-stringify/sync';
 import {existsAsync} from "../utils/ExistsAsync";
 import path from "path";
 import {clearInterval} from "node:timers";
-import {CID_ALGORITHM_NAMES} from "./MultiHashData";
+import {CidAlgorithm} from "./MultiHashData";
 import {stat} from "fs/promises";
 import {Stats} from "node:fs";
 
-interface IndexLine extends Partial<Record<CID_ALGORITHM_NAMES, string>> {
+/**
+ * One row of the on-disk hash-index cache.
+ *
+ * This is the one place a **per-algorithm column** is still the right shape, and
+ * it is not the deprecated one. The index answers "have I already computed sha256
+ * for this file?" on every scan, which a column makes an O(1) lookup and a bare
+ * CID list would make a decode-per-member. It is also strictly local: a wipeable
+ * cache under `/data/cache/hash-index/` (see
+ * `docs/project-architecture/cache-persistence.md`), never a record, never on the
+ * wire.
+ *
+ * What changed is the *naming*: columns are keyed by bare algorithm
+ * (`sha256`, `midhash256`) instead of by the old `cid_<algo>` record-field names,
+ * so the files are `index-sha256.csv`, not `index-cid_sha2-256.csv`. The record
+ * shape and the cache shape are now separate concerns that cannot leak into each
+ * other — which is the whole point of the split (METADATA_KEYS.md §14.13).
+ */
+interface IndexLine extends Partial<Record<CidAlgorithm, string>> {
     path: string;
     size: string;
     mtime: string;
@@ -21,15 +38,15 @@ export class HashIndexManager {
     private cache: Map<string, IndexLine> = new Map<string, IndexLine>();//the key is the file `${file_name}-${filesize}-${mtime_ISOstr}`
     private intervalId: any;
     private intervalTime: number = 30000;
-    private lastIndexFileSize: { [key in CID_ALGORITHM_NAMES]?: number } = {}; //size of the index file last time it was read
-    private lastCacheFile: { [key in CID_ALGORITHM_NAMES]?: IndexLine[] } = {}; //state of the file last time it was read
+    private lastIndexFileSize: { [key in CidAlgorithm]?: number } = {}; //size of the index file last time it was read
+    private lastCacheFile: { [key in CidAlgorithm]?: IndexLine[] } = {}; //state of the file last time it was read
     private indexOpsInProgress: boolean = false;
     private hasChanged: boolean = false;
     private initialLoad: Promise<void>;
-    private filePaths: { [key in CID_ALGORITHM_NAMES]?: string } = {};
+    private filePaths: { [key in CidAlgorithm]?: string } = {};
 
     constructor(private indexFolderPath: string,
-                private targetHash: CID_ALGORITHM_NAMES[]) {
+                private targetHash: CidAlgorithm[]) {
     }
 
     hasFileInCache(filePath: string,stats:Stats): boolean {
@@ -81,7 +98,7 @@ export class HashIndexManager {
     }
 
     // Function to check CSV headers
-    private checkCSVHeaders(csvContent: string, hash: CID_ALGORITHM_NAMES): boolean {
+    private checkCSVHeaders(csvContent: string, hash: CidAlgorithm): boolean {
         const records = parseSync(csvContent, {
             bom: true,
             columns: true,
@@ -116,7 +133,7 @@ export class HashIndexManager {
         this.intervalId = setInterval(() => this.saveCacheToFile(), time);
     }
 
-    public async loadIndex(hash: CID_ALGORITHM_NAMES): Promise<IndexLine[]> {
+    public async loadIndex(hash: CidAlgorithm): Promise<IndexLine[]> {
         if (await existsAsync(this.filePaths[hash])) {
             // check the file size and if it did not change, do not read the file
             const stats = await fs.stat(this.filePaths[hash]);
@@ -147,7 +164,7 @@ export class HashIndexManager {
         return Array.from(this.cache.values());
     }
 
-    private async readCsv(hash: CID_ALGORITHM_NAMES): Promise<IndexLine[]> {
+    private async readCsv(hash: CidAlgorithm): Promise<IndexLine[]> {
         if (!(await existsAsync(this.filePaths[hash]))) {
             return [];
         }
@@ -178,10 +195,8 @@ export class HashIndexManager {
 
     public async saveCacheToFile(): Promise<void> {
         if (this.indexOpsInProgress || !this.hasChanged) {
-            console.log(`[HashIndexManager] saveCacheToFile: Skipping (indexOpsInProgress=${this.indexOpsInProgress}, hasChanged=${this.hasChanged}, cacheSize=${this.cache.size})`);
             return;
         }
-        console.log(`[HashIndexManager] saveCacheToFile: Starting save, cacheSize=${this.cache.size}`);
         this.hasChanged = false;
         this.indexOpsInProgress = true;
         const start = performance.now();
@@ -274,17 +289,15 @@ export class HashIndexManager {
         return null;
     }
 
-    public addFileCid(filePath: string, fileSize: number, mtime: string, hashs: Partial<Record<CID_ALGORITHM_NAMES, string>>): void {
+    public addFileCid(filePath: string, fileSize: number, mtime: string, hashs: Partial<Record<CidAlgorithm, string>>): void {
         if (!filePath || !fileSize || !mtime || !hashs) {
             throw new Error('Invalid parameters');
         }
         // Check that at least one target hash is provided
         const providedHashes = this.targetHash.filter(hash => hashs[hash]);
         if (providedHashes.length === 0) {
-            console.log(`[HashIndexManager] addFileCid: No target hashes provided for ${filePath}. targetHashes=${this.targetHash}, providedKeys=${Object.keys(hashs)}`);
             throw new Error('At least one target hash must be provided');
         }
-        console.log(`[HashIndexManager] addFileCid: Adding ${filePath} with ${providedHashes.length} hashes: ${providedHashes.join(', ')}`);
         const size = fileSize + "";
         const baseName = path.basename(filePath);
         const cacheKey = `${baseName}-${size}-${mtime}`;

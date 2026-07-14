@@ -1,4 +1,4 @@
-import {CID_ALGORITHM_NAMES} from "@root/hash-compute/MultiHashData";
+import {CidAlgorithm} from "@root/hash-compute/MultiHashData";
 import fs from "fs";
 import {Readable} from 'stream';
 import {computeCIDs as computeCIDsInternal} from "./ComputeHash";
@@ -12,7 +12,7 @@ import {createHasher} from "@root/file-id/CreateHasher";
  */
 export default async function computeCIDs({filePath, algorithms}: {
     filePath: string;
-    algorithms: CID_ALGORITHM_NAMES[]
+    algorithms: CidAlgorithm[]
 }): Promise<string[]> {
     const stream = Readable.toWeb(fs.createReadStream(filePath)) as ReadableStream<Uint8Array>;
     return computeCIDsInternal({stream, algorithms, createHasher});

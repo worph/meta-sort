@@ -22,6 +22,63 @@ import type { KeyValuePair } from './IKVClient.js';
  * //   { key: "/file/abc123/video/codec", value: "h265" }
  * // ]
  */
+/**
+ * Fields that never go onto a record under their own name.
+ *
+ * `cids` is an **array of bare CIDs** and must become the key-set
+ * `cids/<cid> = "true"`. If it fell through the generic flattener below it would
+ * emit `cids/0`, `cids/1`, … — array indices, not CIDs — which meta-core's
+ * reverse-index hook would not recognise, silently leaving the record
+ * unresolvable by any of its CIDs. `buildRecordFields` handles it explicitly.
+ *
+ * `hashId` is the record's own address (it *is* the `/file/{hashId}` key), so
+ * storing it as a property inside itself is redundant.
+ */
+const STRUCTURAL_FIELDS = ['cids', 'hashId'];
+
+/**
+ * Turn an in-memory `FileMetadata` into the flat `field → value` map that a
+ * record is made of.
+ *
+ * **This is the single write-shape boundary.** Both writers go through it — the
+ * meta-core HTTP writer and the direct-Redis fallback — because they used not
+ * to: only the HTTP path emitted the `cids/` key-set, so a meta-sort configured
+ * with `redisUrl` and no `metaCoreApiUrl` wrote raw `cid_midhash256` fields that
+ * meta-core never indexed. Records looked fine and could not be found by their
+ * own midhash. One function, one shape, no second path to forget.
+ *
+ * Returns field names relative to the record root (no `/file/{hashId}` prefix).
+ */
+export function buildRecordFields(
+  metadata: any,
+  excludeFields: string[] = []
+): Record<string, string> {
+  const prefix = 'r'; // throwaway root; stripped below
+  const pairs = flattenMetadata(metadata, prefix, [...excludeFields, ...STRUCTURAL_FIELDS]);
+
+  const flat: Record<string, string> = {};
+  for (const pair of pairs) {
+    const field = pair.key.slice(prefix.length + 1); // +1 for the trailing '/'
+    if (field) {
+      flat[field] = pair.value;
+    }
+  }
+
+  // Sibling CIDs are a bare-CID key-set, never per-algorithm named fields.
+  // The midhash is just the member whose multicodec is 0x1000 — there is no
+  // `cid_midhash256`. See METADATA_KEYS.md §2/§14.13.
+  const cids: unknown = metadata?.cids;
+  if (Array.isArray(cids)) {
+    for (const cid of cids) {
+      if (typeof cid === 'string' && cid) {
+        flat[`cids/${cid}`] = 'true';
+      }
+    }
+  }
+
+  return flat;
+}
+
 export function flattenMetadata(
   metadata: any,
   prefix: string,
