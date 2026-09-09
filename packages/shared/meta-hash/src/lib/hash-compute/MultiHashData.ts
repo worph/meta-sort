@@ -1,10 +1,17 @@
 /**
  * Multicodec / multihash codes for every digest meta-hash can compute.
  *
- * Source of truth for these numbers, mirrored in:
+ * Source of truth for these numbers. The same codes appear in the CID utility
+ * RANK, which is a separate thing this file does not implement:
  *   - `packages/meta-core/internal/cid/rank.go`
  *   - the `cid_rank.rs` in each of meta-search and meta-share
- *   - `/cid-rank-vectors.json` (the golden fixture that pins them all together)
+ *   - `/cid-rank-vectors.json` (the golden fixture pinning those three together)
+ *
+ * ⚠ This package used to vendor that fixture at `src/tests/cid-rank-vectors.json`
+ * and no test ever loaded it, so every vector added cost a commit here for
+ * nothing. Removed 2026-09-09. If a TypeScript rank implementation is ever
+ * written, re-add the path to `scripts/check-cid-vectors.sh` *and* a test that
+ * asserts it — a vendored fixture nobody reads is not a guard.
  *
  * ⚠ meta-hash encodes `codec == multihash code` (see `ComputeHash.cidFinalize`:
  * `CID.createV1(code, create(code, digest))`), whereas the fullhash plugin and
