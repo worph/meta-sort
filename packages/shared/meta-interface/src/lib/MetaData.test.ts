@@ -22,13 +22,13 @@ describe('MetaData', () => {
     });
 
     it('should set and get nested metadata using nested keys', () => {
-        root.at('titles').at('eng').set("Star Wars");
-        root.at('titles').at('jpn').set("Staru Warsu");
-        expect(root.at('titles').at('eng').get()).to.equal("Star Wars");
-        expect(root.at('titles').at('jpn').get()).to.equal("Staru Warsu");
-        expect(root.at('titles').get()).to.deep.equal({eng: "Star Wars", jpn: "Staru Warsu"});
+        root.at('titles').at('eng').at('Star Wars').set(true);
+        root.at('titles').at('jpn').at('Staru Warsu').set(true);
+        expect(root.at('titles').at('eng').at('Star Wars').get()).to.equal(true);
+        expect(root.at('titles').at('jpn').at('Staru Warsu').get()).to.equal(true);
+        expect(root.at('titles').get()).to.deep.equal({eng: {"Star Wars": true}, jpn: {"Staru Warsu": true}});
         expect(root.get()).to.deep.equal({
-            titles: {eng: "Star Wars", jpn: "Staru Warsu"}
+            titles: {eng: {"Star Wars": true}, jpn: {"Staru Warsu": true}}
         });
     });
 

@@ -8,8 +8,9 @@ export interface VideoMeta {
     increment?: string;
     movieYear?: string;
     videoType?: VideoType;
+    title?: string;//display title (localized); the one name to show
     originalTitle?: string;//title in original language
-    titles?: LanguageData<string>;// <ISO 639-3 lang codes, title>
+    titles?: LanguageData<Record<string, true>>;// key-set: <ISO 639-3 lang code, {name: true}> — every clean name incl. AKAs (METADATA_KEYS.md §3)
 }
 
 export const VideoMetaFields = [

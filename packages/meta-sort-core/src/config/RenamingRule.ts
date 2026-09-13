@@ -26,7 +26,8 @@ export function renamingRule(metamesh: Local, filepath?: string): string | null 
         throw new Error(`No extension found for file: ${filepath}`);
     }
 
-    const title = metamesh?.titles?.eng || metamesh.originalTitle;
+    // The display name — never the `titles/*` name set, which has no preferred member (METADATA_KEYS.md §3).
+    const title = metamesh.title || metamesh.originalTitle;
     if (!title) {
         if (metamesh.fileType !== "torrent") {
             //don't warn for torrent files because they don't always have a title (eg representing a folder of files)

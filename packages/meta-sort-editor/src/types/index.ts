@@ -9,7 +9,7 @@ export interface FileMetadata {
 
   // Filename parsing
   title?: string;
-  titles?: string[];
+  titles?: Record<string, Record<string, true | string>>; // key-set: lang3 → {name: "true"}
   originaltitle?: string;
   showtitle?: string;
   season?: number;

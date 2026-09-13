@@ -85,13 +85,10 @@ export class JellyfinFormatHandler implements IMetadataFormatHandler {
         if (metadata.originalTitle) jellyfinFields.originalTitle = metadata.originalTitle;
         if (metadata.movieYear) jellyfinFields.year = metadata.movieYear;
 
-        // Titles (first title or original title)
-        if (metadata.titles) {
-            const titleEntries = Object.entries(metadata.titles);
-            if (titleEntries.length > 0) {
-                jellyfinFields.title = titleEntries[0][1];
-            }
-        }
+        // Title: the display name. `titles/*` is an unordered name set with no
+        // preferred member, so it is never the NFO title (METADATA_KEYS.md §3).
+        const title = metadata.title || metadata.originalTitle;
+        if (title) jellyfinFields.title = title;
 
         // IDs
         if (metadata.imdbid) jellyfinFields.imdbid = metadata.imdbid;
