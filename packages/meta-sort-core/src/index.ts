@@ -125,22 +125,18 @@ process.on('SIGINT', async () => {
 // Start initial discovery and processing (streaming pipeline)
 (async () => {
     try {
-        // Validate META_CORE_PATH is configured (required for leader discovery)
-        if (!config.META_CORE_PATH) {
-            console.error('[Startup] ERROR: META_CORE_PATH is required. Set META_CORE_PATH environment variable.');
-            console.error('[Startup] Example: META_CORE_PATH=/meta-core');
-            process.exit(1);
-        }
-
-        // Initialize KV Manager (Redis via leader discovery)
-        if (config.META_CORE_PATH) {
-            console.log('[Startup] Initializing KV Manager (leader discovery)...');
+        // meta-core is located over UDP (meta-discovery v1) — no /meta-core
+        // volume required. META_CORE_URL, when set, pins it and discovery
+        // never overrides; see docs/project-architecture/service-discovery.md.
+        {
+            console.log('[Startup] Initializing KV Manager (meta-core discovery)...');
             kvManager = new KVManager({
                 metaCorePath: config.META_CORE_PATH,
                 filesPath: config.FILES_PATH,
                 serviceName: config.SERVICE_NAME,
                 apiPort: config.FUSE_API_PORT,
                 baseUrl: config.BASE_URL,
+                metaCoreUrl: config.META_CORE_URL,
             });
 
             // Wait for KV to be ready

@@ -28,7 +28,6 @@
 
 import { hostname } from 'os';
 import { LeaderClient } from './LeaderClient.js';
-import { ServiceRegistration } from './ServiceRegistration.js';
 import { RedisKVClient } from './RedisClient.js';
 import type { IKVClient, LeaderLockInfo } from './IKVClient.js';
 import { configure as configureWebdav } from '../webdav/WebdavClient.js';
@@ -59,7 +58,6 @@ interface KVManagerConfig {
 export class KVManager {
     private config: KVManagerConfig;
     private leaderClient: LeaderClient | null = null;
-    private serviceRegistration: ServiceRegistration | null = null;
     private kvClient: IKVClient | null = null;
     private isStarted = false;
     private isShuttingDown = false;
@@ -112,8 +110,9 @@ export class KVManager {
 
         // Initialize leader client
         this.leaderClient = new LeaderClient({
-            metaCorePath: this.config.metaCorePath,
-            metaCoreUrl: this.config.metaCoreUrl
+            metaCoreUrl: this.config.metaCoreUrl,
+            serviceName: this.config.serviceName,
+            baseUrl: this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`,
         });
 
         // Watch for leader changes
@@ -149,15 +148,9 @@ export class KVManager {
         // Start watching for leader changes
         this.leaderClient.startWatching();
 
-        // Initialize and start service registration for heartbeat
-        const apiUrl = this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`;
-        this.serviceRegistration = new ServiceRegistration({
-            metaCorePath: this.config.metaCorePath,
-            serviceName: this.config.serviceName,
-            version: '1.0.0',
-            apiUrl
-        });
-        await this.serviceRegistration.start();
+        // No separate service registration step any more: the LeaderClient's
+        // discovery node announces this service on the same UDP group it
+        // listens on, so being discoverable and discovering are one thing.
 
         this.isStarted = true;
         this.notifyReady();
@@ -224,10 +217,6 @@ export class KVManager {
         }
 
         // Service registration stop (if it was started)
-        if (this.serviceRegistration) {
-            await this.serviceRegistration.stop();
-            this.serviceRegistration = null;
-        }
 
         this.isStarted = false;
         console.log('[KVManager] Stopped');
@@ -324,8 +313,9 @@ export class KVManager {
     /**
      * Get service registration instance
      */
-    getServiceRegistration(): ServiceRegistration | null {
-        return this.serviceRegistration;
+    /** @deprecated File-based registration is gone; always null. */
+    getServiceRegistration(): null {
+        return null;
     }
 
     /**

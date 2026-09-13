@@ -142,53 +142,18 @@ export class ContainerManager extends EventEmitter {
             return;
         }
 
-        // Fall back to service discovery for any missing URLs
-        const serviceFile = join(config.META_CORE_PATH, 'services', 'meta-sort.json');
-
-        try {
-            const content = await fs.readFile(serviceFile, 'utf-8');
-            const serviceInfo: ServiceInfo = JSON.parse(content);
-
-            // Extract URLs from service info
-            const api = serviceInfo.api;
-            const endpoints = serviceInfo.endpoints || {};
-
-            // Use service discovery for callback URL if not set
-            if (!this.callbackUrl) {
-                if (endpoints.callback) {
-                    this.callbackUrl = endpoints.callback;
-                    console.log(`[ContainerManager] Discovered callback URL: ${this.callbackUrl}`);
-                } else if (api) {
-                    // Fallback: construct from api base
-                    this.callbackUrl = `${api}/api/plugins/callback`;
-                    console.log(`[ContainerManager] Constructed callback URL: ${this.callbackUrl}`);
-                }
-            }
-
-            // Use service discovery for WebDAV URL if not set (fallback)
-            if (!this.webdavUrl) {
-                if (endpoints.webdav) {
-                    this.webdavUrl = endpoints.webdav;
-                    console.log(`[ContainerManager] Discovered WebDAV URL: ${this.webdavUrl}`);
-                } else if (api) {
-                    // Fallback: construct from api base
-                    this.webdavUrl = `${api}/webdav`;
-                    console.log(`[ContainerManager] Constructed WebDAV URL: ${this.webdavUrl}`);
-                }
-            }
-
-            if (endpoints.health) {
-                // Extract meta-core URL from health endpoint
-                const healthUrl = new URL(endpoints.health);
-                this.metaCoreUrl = `${healthUrl.protocol}//${healthUrl.host}`;
-                console.log(`[ContainerManager] Discovered meta-core URL: ${this.metaCoreUrl}`);
-            }
-
-            console.log('[ContainerManager] Service discovery successful');
-        } catch (error) {
-            console.warn(`[ContainerManager] Service discovery failed: ${error}`);
-            console.log(`[ContainerManager] Using callback URL: ${this.callbackUrl}`);
-            console.log(`[ContainerManager] Using WebDAV URL: ${this.webdavUrl || 'not set'}`);
+        // Anything still missing is a configuration problem, not something to
+        // guess at. The old fallback here read
+        // `${META_CORE_PATH}/services/meta-sort.json` — a filename that stopped
+        // existing when registration files became hostname-suffixed, using a
+        // schema (`.api` / `.endpoints`) that no longer matched either. It had
+        // been falling into its own catch block for a long time, and the
+        // volume it read is gone since meta-discovery v1.
+        if (!this.callbackUrl) {
+            console.warn('[ContainerManager] No callback URL — set CONTAINER_CALLBACK_URL');
+        }
+        if (!this.webdavUrl) {
+            console.warn('[ContainerManager] No WebDAV URL — meta-core did not supply one');
         }
     }
 
