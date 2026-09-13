@@ -8,6 +8,7 @@
 
 import type { HashMeta } from '@metazla/meta-interface';
 import type { IKVClient } from '../kv/IKVClient.js';
+import type { FileTuplesResult } from '../kv/MetaCoreApiWriter.js';
 import type { FileAnalyzerInterface } from '../logic/fileProcessor/FileAnalyzerInterface.js';
 import type { ContainerTask } from '../container-plugins/types.js';
 import type { UnifiedProcessingSnapshot } from '../logic/UnifiedProcessingStateManager.js';
@@ -39,6 +40,21 @@ export interface IKVClientWithPubSub extends IKVClient {
  */
 export function hasPublish(client: IKVClient): client is IKVClientWithPubSub {
     return typeof (client as IKVClientWithPubSub).publish === 'function';
+}
+
+/**
+ * IKVClient that can list meta-core's file-backed roots in one call
+ * (GET /api/files/tuples). Resolves null when meta-core predates the endpoint.
+ */
+export interface IKVClientWithFileTuples extends IKVClient {
+    getFileTuples(opts?: { summary?: boolean }): Promise<FileTuplesResult | null>;
+}
+
+/**
+ * Type guard to check if a KVClient can list file-backed roots
+ */
+export function hasFileTuples(client: IKVClient): client is IKVClientWithFileTuples {
+    return typeof (client as IKVClientWithFileTuples).getFileTuples === 'function';
 }
 
 /**

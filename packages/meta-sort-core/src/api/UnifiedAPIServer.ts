@@ -11,8 +11,9 @@ import { performanceMetrics } from '../metrics/PerformanceMetrics.js';
 import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateManager.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import type { KVManager } from '../kv/KVManager.js';
-import type { ExtendedProcessingSnapshot, IKVClientWithPubSub } from '../types/ExtendedInterfaces.js';
-import { getErrorMessage } from '../types/ExtendedInterfaces.js';
+import type { ExtendedProcessingSnapshot } from '../types/ExtendedInterfaces.js';
+import { getErrorMessage, hasFileTuples } from '../types/ExtendedInterfaces.js';
+import type { IKVClientWithFileTuples } from '../types/ExtendedInterfaces.js';
 import { config } from '../config/EnvConfig.js';
 import * as webdav from '../webdav/WebdavClient.js';
 import type { PluginManager } from '../plugin-engine/PluginManager.js';
@@ -27,6 +28,45 @@ export interface UnifiedAPIServerConfig {
   host?: string;
   /** Enable CORS (default: true) */
   enableCors?: boolean;
+}
+
+/** File totals served by /api/stats. Null when meta-core cannot supply them. */
+interface FileStats {
+  fileCount: number | null;
+  totalSize: number | null;
+  source: 'meta-core' | 'unavailable';
+}
+
+/** Metadata reads in flight at once while a recompute builds its task list. */
+const RECOMPUTE_READ_CONCURRENCY = 8;
+
+/** Run `worker` over `items` with at most `limit` calls in flight. */
+async function forEachWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
+/** Flatten nested metadata into the `a/b/c` keys the task scheduler expects. */
+function flattenMetadata(obj: Record<string, unknown>, out: Record<string, string> = {}, prefix = ''): Record<string, string> {
+  for (const [key, value] of Object.entries(obj)) {
+    const fullKey = prefix ? `${prefix}/${key}` : key;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      flattenMetadata(value as Record<string, unknown>, out, fullKey);
+    } else if (value !== undefined && value !== null) {
+      out[fullKey] = String(value);
+    }
+  }
+  return out;
 }
 
 export class UnifiedAPIServer {
@@ -44,9 +84,15 @@ export class UnifiedAPIServer {
   private containerPluginScheduler: ContainerPluginScheduler | null = null;
   private streamingPipeline: StreamingPipeline | null = null;
 
-  // Cache for total file size (avoid running du on every request)
-  private totalSizeCache: { value: number; timestamp: number } | null = null;
-  private static TOTAL_SIZE_CACHE_TTL_MS = 30000; // 30 seconds
+  // /api/stats file totals: stale-while-revalidate, one refresh at a time.
+  // Never walk hashIds for these — on a shared meta-core that is every gateway
+  // record too (82k on watch.nsl.sh), and a sweep per poll stacked unbounded.
+  private fileStats: { value: FileStats; fetchedAt: number } | null = null;
+  private fileStatsInFlight: Promise<FileStats> | null = null;
+  private static FILE_STATS_TTL_MS = 30000; // 30 seconds
+
+  // Plugins whose recompute is currently being queued (single-flight per plugin)
+  private recomputeInFlight = new Set<string>();
 
   constructor(
     config: UnifiedAPIServerConfig = {},
@@ -97,48 +143,46 @@ export class UnifiedAPIServer {
   }
 
   /**
-   * Get total size of processed files from Redis sizeByte field (cached)
-   * This is "eventually correct" - accumulates as files are processed by the file-info plugin
+   * File count + total size of the files meta-core holds on disk, for the
+   * monitor's "Total Size" card: one summary call to meta-core's
+   * GET /api/files/tuples (batched server-side), cached for FILE_STATS_TTL_MS.
+   *
+   * Stale-while-revalidate with a single in-flight refresh — a poll never waits
+   * on meta-core once a value exists, and concurrent polls share one request.
    */
-  private async getTotalFileSizeFromRedis(): Promise<number> {
-    // Check cache
-    const now = Date.now();
-    if (this.totalSizeCache && (now - this.totalSizeCache.timestamp) < UnifiedAPIServer.TOTAL_SIZE_CACHE_TTL_MS) {
-      return this.totalSizeCache.value;
+  private async getFileStats(): Promise<FileStats> {
+    const cached = this.fileStats;
+    if (cached && Date.now() - cached.fetchedAt < UnifiedAPIServer.FILE_STATS_TTL_MS) {
+      return cached.value;
     }
 
-    // Sum sizeByte from all file entries in Redis
-    let totalSize = 0;
-
-    if (!this.kvClient) {
-      return 0;
+    if (!this.fileStatsInFlight) {
+      this.fileStatsInFlight = this.fetchFileStats()
+        .catch((error: unknown): FileStats => {
+          console.warn('[API] /api/stats: meta-core file totals unavailable:', getErrorMessage(error));
+          return cached?.value ?? { fileCount: null, totalSize: null, source: 'unavailable' };
+        })
+        .then((value) => {
+          this.fileStats = { value, fetchedAt: Date.now() };
+          return value;
+        })
+        .finally(() => {
+          this.fileStatsInFlight = null;
+        });
     }
 
-    try {
-      // Get all file hash IDs
-      const hashIds = await this.kvClient.getAllHashIds();
+    return cached ? cached.value : this.fileStatsInFlight;
+  }
 
-      // Sum up sizeByte values (batch process for efficiency)
-      for (const hashId of hashIds) {
-        try {
-          const sizeByte = await this.kvClient.getMetadata(hashId, 'sizeByte');
-          if (sizeByte !== null && sizeByte !== undefined) {
-            const size = typeof sizeByte === 'number' ? sizeByte : parseInt(String(sizeByte), 10);
-            if (!isNaN(size) && size > 0) {
-              totalSize += size;
-            }
-          }
-        } catch {
-          // Skip entries without sizeByte
-        }
-      }
-    } catch (error) {
-      console.warn('[API] Failed to calculate total size from Redis:', error);
+  private async fetchFileStats(): Promise<FileStats> {
+    if (!this.kvClient || !hasFileTuples(this.kvClient)) {
+      return { fileCount: null, totalSize: null, source: 'unavailable' };
     }
-
-    // Update cache
-    this.totalSizeCache = { value: totalSize, timestamp: now };
-    return totalSize;
+    const summary = await this.kvClient.getFileTuples({ summary: true });
+    if (!summary) {
+      return { fileCount: null, totalSize: null, source: 'unavailable' };
+    }
+    return { fileCount: summary.count, totalSize: summary.totalSize, source: 'meta-core' };
   }
 
   /**
@@ -524,53 +568,17 @@ export class UnifiedAPIServer {
 
 
   /**
-   * Setup Stats API routes (Redis stats for monitor UI)
+   * Setup Stats API routes (file totals for the monitor UI)
    */
   private setupStatsRoutes(): void {
     if (!this.kvClient) {
       return;
     }
 
-    // Get Redis/KV stats (for monitor UI)
-    this.app.get('/api/stats', async (request, reply) => {
-      try {
-        const hashIds = await this.kvClient!.getAllHashIds();
-        const redis = (this.kvClient as IKVClientWithPubSub).getRedisClient?.() as { info: (section: string) => Promise<string> } | undefined;
-
-        let memoryUsage = 'N/A';
-        let memoryUsageBytes = 0;
-        if (redis) {
-          try {
-            const info = await redis.info('memory');
-            const match = info.match(/used_memory_human:(\S+)/);
-            const bytesMatch = info.match(/used_memory:(\d+)/);
-            if (match) {
-              memoryUsage = match[1];
-            }
-            if (bytesMatch) {
-              memoryUsageBytes = parseInt(bytesMatch[1], 10);
-            }
-          } catch {
-            // Ignore memory info errors
-          }
-        }
-
-        // Get total size from Redis sizeByte (eventually correct as files are processed)
-        const totalSize = await this.getTotalFileSizeFromRedis();
-
-        return {
-          fileCount: hashIds.length,
-          keyCount: hashIds.length,
-          totalSize,
-          memoryUsage,
-          memoryUsageBytes
-        };
-      } catch (error: any) {
-        return reply.status(500).send({
-          error: 'Failed to get stats',
-          details: error.message
-        });
-      }
+    // At most one meta-core call per FILE_STATS_TTL_MS however often the
+    // monitor polls — see getFileStats.
+    this.app.get('/api/stats', async () => {
+      return this.getFileStats();
     });
   }
 
@@ -886,38 +894,43 @@ export class UnifiedAPIServer {
         return reply.status(400).send({ error: `Plugin '${pluginId}' is not active` });
       }
 
+      if (!hasFileTuples(this.kvClient)) {
+        return reply.status(501).send({ error: 'Recompute needs meta-core GET /api/files/tuples' });
+      }
+      const kvClient = this.kvClient as IKVClientWithFileTuples;
+
+      if (this.recomputeInFlight.has(pluginId)) {
+        return reply.status(409).send({ error: `Recompute for plugin '${pluginId}' is already being queued` });
+      }
+
+      this.recomputeInFlight.add(pluginId);
       try {
-        // Get all files from KV
-        const hashIds = await this.kvClient.getAllHashIds();
-        console.log(`[Recompute] Starting recompute for plugin '${pluginId}' on ${hashIds.length} files`);
+        // Only file-backed records can be recomputed, and meta-core lists exactly
+        // those in one batched call. Walking getAllHashIds() instead reads every
+        // gateway record too (82k on watch.nsl.sh) to keep a few thousand.
+        const tuples = await kvClient.getFileTuples();
+        if (!tuples || !tuples.files) {
+          return reply.status(501).send({
+            error: 'Recompute needs meta-core GET /api/files/tuples',
+            details: 'meta-core did not return a file list'
+          });
+        }
+        const candidates = tuples.files;
+        console.log(`[Recompute] Starting recompute for plugin '${pluginId}' on ${candidates.length} files`);
 
         // Prepare file data with metadata for TaskScheduler
         const files: Array<{ filePath: string; fileHash: string; kvData?: Record<string, string> }> = [];
-
-        for (const hashId of hashIds) {
-          const metadata = await this.kvClient.getMetadataFlat(hashId);
-          if (metadata && metadata.filePath) {
-            // Convert nested metadata to flat key-value pairs for KVStore
-            const kvData: Record<string, string> = {};
-            const flattenObj = (obj: any, prefix = '') => {
-              for (const [key, value] of Object.entries(obj)) {
-                const fullKey = prefix ? `${prefix}/${key}` : key;
-                if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-                  flattenObj(value, fullKey);
-                } else if (value !== undefined && value !== null) {
-                  kvData[fullKey] = String(value);
-                }
-              }
-            };
-            flattenObj(metadata);
-
-            files.push({
-              fileHash: hashId,
-              filePath: metadata.filePath,
-              kvData
-            });
+        await forEachWithConcurrency(candidates, RECOMPUTE_READ_CONCURRENCY, async (tuple) => {
+          const metadata = await kvClient.getMetadataFlat(tuple.hashId);
+          if (!metadata) {
+            return;
           }
-        }
+          files.push({
+            fileHash: tuple.hashId,
+            filePath: metadata.filePath || tuple.filePath,
+            kvData: flattenMetadata(metadata)
+          });
+        });
 
         // Create and enqueue tasks with forceRecompute option
         const tasks = taskScheduler.createTasksForPluginOnFiles(
@@ -935,7 +948,7 @@ export class UnifiedAPIServer {
           status: 'ok',
           message: `Recompute triggered for plugin '${pluginId}'`,
           filesQueued: tasks.length,
-          totalFiles: hashIds.length
+          totalFiles: candidates.length
         };
       } catch (error: any) {
         console.error(`[Recompute] Error triggering recompute for plugin '${pluginId}':`, error);
@@ -943,6 +956,8 @@ export class UnifiedAPIServer {
           error: 'Failed to trigger recompute',
           details: error.message
         });
+      } finally {
+        this.recomputeInFlight.delete(pluginId);
       }
     });
   }

@@ -8,6 +8,7 @@
 import { expect } from 'chai';
 import { UnifiedAPIServer } from './UnifiedAPIServer.js';
 import { UnifiedProcessingStateManager } from '../logic/UnifiedProcessingStateManager.js';
+import { performanceMetrics } from '../metrics/PerformanceMetrics.js';
 import type { IKVClient } from '../kv/IKVClient.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -22,6 +23,25 @@ import type { FastifyInstance } from 'fastify';
 class MockKVClient implements IKVClient {
     private data: Map<string, Map<string, any>> = new Map();
     private rawStore: Map<string, string> = new Map();
+
+    // Stand-in for meta-core's GET /api/files/tuples. null = a meta-core that
+    // predates the endpoint.
+    fileTuples: Array<{ hashId: string; filePath: string; sizeByte: number; mtimeNano: number }> | null = null;
+    fileTuplesDelayMs = 0;
+    calls = { getFileTuples: 0, getAllHashIds: 0, getMetadataFlat: 0 };
+
+    async getFileTuples(opts: { summary?: boolean } = {}) {
+        this.calls.getFileTuples++;
+        if (this.fileTuplesDelayMs) {
+            await new Promise(resolve => setTimeout(resolve, this.fileTuplesDelayMs));
+        }
+        if (!this.fileTuples) return null;
+        const files = this.fileTuples;
+        const totalSize = files.reduce((sum, f) => sum + f.sizeByte, 0);
+        return opts.summary
+            ? { count: files.length, totalSize }
+            : { count: files.length, totalSize, files };
+    }
 
     // Basic operations
     async set(key: string, value: any): Promise<void> {
@@ -99,6 +119,7 @@ class MockKVClient implements IKVClient {
     }
 
     async getMetadataFlat(hashId: string): Promise<any | null> {
+        this.calls.getMetadataFlat++;
         const entry = this.data.get(hashId);
         if (!entry) return null;
         return Object.fromEntries(entry);
@@ -125,6 +146,7 @@ class MockKVClient implements IKVClient {
     }
 
     async getAllHashIds(): Promise<string[]> {
+        this.calls.getAllHashIds++;
         return Array.from(this.data.keys());
     }
 
@@ -734,5 +756,159 @@ describe('UnifiedAPIServer', function() {
 
             expect(response.statusCode).to.equal(404);
         });
+    });
+});
+
+// =============================================================================
+// File totals + recompute against meta-core's GET /api/files/tuples
+// =============================================================================
+//
+// Each test builds its own server: /api/stats caches for 30 s and recompute is
+// single-flight, so shared state between tests would hide both behaviours.
+
+describe('UnifiedAPIServer file totals and recompute', function() {
+    const tuple = (hashId: string, sizeByte: number) =>
+        ({ hashId, filePath: `/files/watch/${hashId}.mkv`, sizeByte, mtimeNano: 1 });
+
+    let app: FastifyInstance;
+    let kv: MockKVClient;
+    let queued: Array<{ pluginId: string; fileHash: string }>;
+
+    beforeEach(async function() {
+        kv = new MockKVClient();
+        queued = [];
+        const pluginManager = { getPlugins: () => [{ id: 'ffmpeg', active: true }] };
+        const taskScheduler = {
+            createTasksForPluginOnFiles: (pluginId: string, files: Array<{ fileHash: string }>) =>
+                files.map(f => ({ pluginId, fileHash: f.fileHash })),
+            enqueueTasks: (tasks: Array<{ pluginId: string; fileHash: string }>) => { queued.push(...tasks); },
+        };
+        const server = new UnifiedAPIServer(
+            { port: 0, host: 'localhost', enableCors: false },
+            new MockProcessingStateManager() as any,
+            kv as any,
+            4,
+            16,
+            () => ({ fast: { pending: 0, running: 0 }, background: { pending: 0, running: 0 } }),
+            undefined,
+            () => pluginManager as any,
+            () => taskScheduler as any
+        );
+        app = server.getApp();
+        await app.ready();
+    });
+
+    afterEach(async function() {
+        await app.close();
+    });
+
+    it('GET /api/stats sums meta-core file tuples without walking hash ids', async function() {
+        kv.fileTuples = [tuple('a', 100), tuple('b', 250)];
+
+        const response = await app.inject({ method: 'GET', url: '/api/stats' });
+
+        expect(response.statusCode).to.equal(200);
+        expect(JSON.parse(response.payload)).to.deep.equal({ fileCount: 2, totalSize: 350, source: 'meta-core' });
+        expect(kv.calls.getAllHashIds).to.equal(0);
+        expect(kv.calls.getMetadataFlat).to.equal(0);
+    });
+
+    it('GET /api/stats degrades to nulls on a meta-core without the endpoint', async function() {
+        kv.fileTuples = null;
+
+        const response = await app.inject({ method: 'GET', url: '/api/stats' });
+
+        expect(response.statusCode).to.equal(200);
+        expect(JSON.parse(response.payload)).to.deep.equal({ fileCount: null, totalSize: null, source: 'unavailable' });
+        expect(kv.calls.getAllHashIds).to.equal(0);
+    });
+
+    it('GET /api/stats shares one meta-core call between concurrent polls', async function() {
+        kv.fileTuples = [tuple('a', 100)];
+        kv.fileTuplesDelayMs = 50;
+
+        const responses = await Promise.all(
+            Array.from({ length: 10 }, () => app.inject({ method: 'GET', url: '/api/stats' }))
+        );
+
+        for (const response of responses) {
+            expect(response.statusCode).to.equal(200);
+            expect(JSON.parse(response.payload).totalSize).to.equal(100);
+        }
+        expect(kv.calls.getFileTuples).to.equal(1);
+    });
+
+    it('POST recompute returns 501 on a meta-core without the endpoint', async function() {
+        kv.fileTuples = null;
+
+        const response = await app.inject({ method: 'POST', url: '/api/plugins/ffmpeg/recompute' });
+
+        expect(response.statusCode).to.equal(501);
+        expect(kv.calls.getAllHashIds).to.equal(0);
+        expect(queued).to.have.length(0);
+    });
+
+    it('POST recompute queues only file-backed records', async function() {
+        kv.seedData('a', { filePath: '/files/watch/a.mkv', fileType: 'video' });
+        kv.seedData('b', { filePath: '/files/watch/b.mkv', fileType: 'video' });
+        kv.seedData('gateway-record', { title: 'Not a file' });
+        kv.fileTuples = [tuple('a', 100), tuple('b', 250)];
+
+        const response = await app.inject({ method: 'POST', url: '/api/plugins/ffmpeg/recompute' });
+
+        expect(response.statusCode).to.equal(200);
+        const body = JSON.parse(response.payload);
+        expect(body.filesQueued).to.equal(2);
+        expect(body.totalFiles).to.equal(2);
+        expect(queued.map(q => q.fileHash).sort()).to.deep.equal(['a', 'b']);
+        expect(kv.calls.getMetadataFlat).to.equal(2);
+        expect(kv.calls.getAllHashIds).to.equal(0);
+    });
+
+    it('POST recompute refuses a second run for the same plugin while one is queuing', async function() {
+        kv.seedData('a', { filePath: '/files/watch/a.mkv' });
+        kv.fileTuples = [tuple('a', 100)];
+        kv.fileTuplesDelayMs = 50;
+
+        const [first, second] = await Promise.all([
+            app.inject({ method: 'POST', url: '/api/plugins/ffmpeg/recompute' }),
+            app.inject({ method: 'POST', url: '/api/plugins/ffmpeg/recompute' }),
+        ]);
+
+        expect([first.statusCode, second.statusCode].sort()).to.deep.equal([200, 409]);
+        expect(queued).to.have.length(1);
+    });
+});
+
+// =============================================================================
+// File-level processing metric
+// =============================================================================
+
+describe('UnifiedProcessingStateManager file metric', function() {
+    // Files announced over SSE go straight to light processing; they are never
+    // marked discovered, which is the path that used to leave "Processed" at 0.
+    const runFile = (manager: UnifiedProcessingStateManager, filePath: string, error?: string) => {
+        manager.startLightProcessing(filePath);
+        manager.completeLightProcessing(filePath, 'bagacbabaeexamplehash');
+        manager.startHashProcessing(filePath);
+        manager.completeHashProcessing(filePath, 'bagacbabaeexamplehash', undefined, error);
+    };
+
+    it('counts a file as processed when its hash phase completes cleanly', function() {
+        const manager = new UnifiedProcessingStateManager();
+        const before = performanceMetrics.getMetrics().totalFilesProcessed;
+
+        runFile(manager, '/files/watch/metric-ok.mkv');
+
+        expect(performanceMetrics.getMetrics().totalFilesProcessed).to.equal(before + 1);
+    });
+
+    it('does not count a file whose hash phase failed', function() {
+        const manager = new UnifiedProcessingStateManager();
+        const before = performanceMetrics.getMetrics().totalFilesProcessed;
+
+        runFile(manager, '/files/watch/metric-failed.mkv', 'plugin failed');
+
+        expect(performanceMetrics.getMetrics().totalFilesProcessed).to.equal(before);
     });
 });

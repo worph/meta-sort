@@ -195,6 +195,16 @@ export class UnifiedProcessingStateManager {
       performanceMetrics.recordHashProcessing(hashProcessingTime);
     }
 
+    // File-level metric, one per file that finished cleanly. Nothing recorded
+    // it before, so the monitor's "Processed" tile stayed at 0. Files announced
+    // over SSE are never marked discovered, so fall back to the light phase.
+    if (!error) {
+      const fileTime = totalProcessingTime
+        ?? (hashState?.lightProcessingStartedAt !== undefined ? now - hashState.lightProcessingStartedAt : hashProcessingTime)
+        ?? 0;
+      performanceMetrics.recordFileProcessing(filePath, fileTime);
+    }
+
     const doneState: UnifiedFileState = {
       filePath,
       state: 'done',

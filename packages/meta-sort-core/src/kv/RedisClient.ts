@@ -21,7 +21,7 @@ import {
     buildFilePrefix,
     buildPropertyKey,
 } from './MetadataUtils.js';
-import { MetaCoreApiWriter } from './MetaCoreApiWriter.js';
+import { MetaCoreApiWriter, type FileTuplesResult } from './MetaCoreApiWriter.js';
 
 // ESM/CJS interop for ioredis
 const Redis = (IORedis as any).default ?? IORedis;
@@ -102,7 +102,22 @@ export class RedisKVClient implements IKVClient {
             // automatic connect. Any caller that tries to use the Redis
             // path (e.g. unmigrated stream code) will fail loudly rather
             // than silently misbehaving.
-            this.redis = new Redis({ host: '127.0.0.1', port: 0, lazyConnect: true, enableOfflineQueue: false });
+            this.redis = new Redis({
+                host: '127.0.0.1',
+                port: 0,
+                lazyConnect: true,
+                enableOfflineQueue: false,
+                // Never reconnect. A stub that retries turns one stray call into
+                // an endless "Unhandled error event: ECONNREFUSED" loop.
+                retryStrategy: () => null,
+                maxRetriesPerRequest: 0,
+            });
+            let stubWarned = false;
+            this.redis.on('error', (err: Error) => {
+                if (stubWarned) return;
+                stubWarned = true;
+                console.warn(`[Redis] HTTP-only stub was used and refused (${err.message}) — a caller still reaches for direct Redis`);
+            });
             this.isConnected = false;
             console.log('[Redis] HTTP-only mode — no direct Redis connection');
             return;
@@ -472,6 +487,15 @@ export class RedisKVClient implements IKVClient {
         }
         const indexKey = this.buildKey('file:__index__');
         return await this.redis.smembers(indexKey);
+    }
+
+    /**
+     * File-backed roots from meta-core (GET /api/files/tuples). Only the HTTP
+     * writer can serve this; direct-Redis mode returns null so callers take
+     * their degraded path instead of sweeping every record.
+     */
+    async getFileTuples(opts: { summary?: boolean } = {}): Promise<FileTuplesResult | null> {
+        return this.writer ? this.writer.getFileTuples(opts) : null;
     }
 
     // ========================================================================

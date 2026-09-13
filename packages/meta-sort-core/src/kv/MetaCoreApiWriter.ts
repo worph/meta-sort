@@ -19,6 +19,24 @@ import {
     buildFilePrefix,
 } from './MetadataUtils.js';
 
+/** One file-backed root as listed by meta-core's GET /api/files/tuples. */
+export interface FileTuple {
+    hashId: string;
+    filePath: string;
+    sizeByte: number;
+    mtimeNano: number;
+}
+
+/**
+ * GET /api/files/tuples body. `files` is present unless the summary form was
+ * asked for.
+ */
+export interface FileTuplesResult {
+    count: number;
+    totalSize: number;
+    files?: FileTuple[];
+}
+
 export interface MetaCoreApiWriterConfig {
     /** Base URL for meta-core's HTTP API (e.g. http://metacore-app:9000) */
     apiUrl: string;
@@ -137,6 +155,27 @@ export class MetaCoreApiWriter {
         const body = await this.fetchJson('GET', '/meta', null);
         const ids = (body as any)?.hashIds;
         return Array.isArray(ids) ? ids : [];
+    }
+
+    /**
+     * GET /api/files/tuples. meta-core's FILE-BACKED roots (records carrying
+     * filePath, sizeByte and mtimeNano) with sizes, read server-side in batched
+     * MGETs — the cheap alternative to walking getAllHashIds(), which on a
+     * shared meta-core is every gateway record too. `summary` omits the rows.
+     *
+     * Returns null when meta-core predates the endpoint (404, or a body that is
+     * not the expected JSON).
+     */
+    async getFileTuples(opts: { summary?: boolean } = {}): Promise<FileTuplesResult | null> {
+        const path = opts.summary ? '/api/files/tuples?summary=1' : '/api/files/tuples';
+        const body = await this.fetchJsonAllowing404('GET', path);
+        if (!body || typeof body !== 'object') return null;
+        const b = body as { count?: unknown; totalSize?: unknown; files?: unknown };
+        return {
+            count: Number(b.count) || 0,
+            totalSize: Number(b.totalSize) || 0,
+            files: Array.isArray(b.files) ? (b.files as FileTuple[]) : undefined,
+        };
     }
 
     /**

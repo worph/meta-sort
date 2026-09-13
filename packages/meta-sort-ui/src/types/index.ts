@@ -184,12 +184,12 @@ export interface Metrics {
 
 // NOTE: DuplicateGroup and DuplicateData types have been moved to meta-dup service
 
+/** GET /api/stats: totals over meta-core's file-backed roots. */
 export interface RedisStats {
-    fileCount: number;
-    keyCount: number;
-    totalSize: number;
-    memoryUsage?: string;
-    memoryUsageBytes?: number;
+    /** null when meta-core cannot supply file totals (source 'unavailable') */
+    fileCount: number | null;
+    totalSize: number | null;
+    source?: 'meta-core' | 'unavailable';
 }
 
 export interface QueueItem {

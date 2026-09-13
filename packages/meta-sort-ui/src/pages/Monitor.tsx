@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     ProcessingStatus,
     Metrics,
@@ -60,29 +60,35 @@ function Monitor() {
     const [failedFiles, setFailedFiles] = useState<FailedFile[]>([]);
     const [showPipelineHelp, setShowPipelineHelp] = useState(false);
 
-    const fetchData = useCallback(async () => {
-        try {
-            const [statusRes, metricsRes, queueRes, statsRes, failedRes] = await Promise.all([
-                fetch('/api/processing/status'),
-                fetch('/api/metrics'),
-                fetch('/api/processing/queue'),
-                fetch('/api/stats'),
-                fetch('/api/processing/failed')
-            ]);
+    // Each endpoint renders as soon as it answers, so one slow or failing call
+    // cannot blank the page. A tick is skipped while the previous one is still
+    // out, so a slow backend never collects a pile of overlapping polls.
+    const pollInFlight = useRef(false);
 
-            if (statusRes.ok) setStatus(await statusRes.json());
-            if (metricsRes.ok) setMetrics(await metricsRes.json());
-            if (queueRes.ok) {
-                const queueData = await queueRes.json();
-                setQueue(queueData.items || []);
+    const fetchData = useCallback(async () => {
+        if (pollInFlight.current) return;
+        pollInFlight.current = true;
+
+        const load = async <T,>(url: string, apply: (data: T) => void) => {
+            const res = await fetch(url);
+            if (res.ok) apply(await res.json());
+        };
+
+        try {
+            const results = await Promise.allSettled([
+                load<ProcessingStatus>('/api/processing/status', setStatus),
+                load<Metrics>('/api/metrics', setMetrics),
+                load<{ items?: QueueItem[] }>('/api/processing/queue', (data) => setQueue(data.items || [])),
+                load<RedisStats>('/api/stats', setRedisStats),
+                load<{ failedFiles?: FailedFile[] }>('/api/processing/failed', (data) => setFailedFiles(data.failedFiles || [])),
+            ]);
+            for (const result of results) {
+                if (result.status === 'rejected') {
+                    console.error('Failed to fetch data:', result.reason);
+                }
             }
-            if (statsRes.ok) setRedisStats(await statsRes.json());
-            if (failedRes.ok) {
-                const failedData = await failedRes.json();
-                setFailedFiles(failedData.failedFiles || []);
-            }
-        } catch (err) {
-            console.error('Failed to fetch data:', err);
+        } finally {
+            pollInFlight.current = false;
         }
     }, []);
 
@@ -410,7 +416,7 @@ function Monitor() {
                     <h3 className="section-title">File Coverage</h3>
                     <div className="stats-grid">
                         <div className="stat-box">
-                            <div className="stat-value">{status?.uniqueHashes ? formatNumber(status.uniqueHashes) : (redisStats ? formatNumber(redisStats.fileCount) : '-')}</div>
+                            <div className="stat-value">{status?.uniqueHashes ? formatNumber(status.uniqueHashes) : (redisStats?.fileCount != null ? formatNumber(redisStats.fileCount) : '-')}</div>
                             <div className="stat-label">Unique Files</div>
                         </div>
                         <div className="stat-box">
@@ -432,7 +438,7 @@ function Monitor() {
                 <div className="card total-size-card">
                     <h2>Total Size</h2>
                     <div className="total-size-value">
-                        {redisStats ? formatBytes(redisStats.totalSize) : '-'}
+                        {redisStats?.totalSize != null ? formatBytes(redisStats.totalSize) : '-'}
                     </div>
                     <div className="total-size-label">Watch Folders</div>
                 </div>
