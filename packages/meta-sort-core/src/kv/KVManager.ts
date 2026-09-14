@@ -2,13 +2,12 @@
  * KV Manager - Unified manager for KV storage and service discovery
  *
  * This is the main entry point for the KV subsystem. It:
- * 1. Uses LeaderClient to read leader info from meta-core
+ * 1. Uses LeaderClient to locate meta-core over UDP (meta-discovery v1)
  * 2. Creates and manages the KV client (Redis)
- * 3. Handles service discovery registration
  * 4. Manages reconnection on leader changes
  *
- * Note: Leader election is now handled by meta-core (Go sidecar).
- * This service only reads the leader info and connects to Redis.
+ * Note: there is no leader election. meta-core announces itself on the
+ * discovery group; this service listens and connects to its HTTP API.
  *
  * Usage:
  * ```typescript
@@ -112,7 +111,12 @@ export class KVManager {
         this.leaderClient = new LeaderClient({
             metaCoreUrl: this.config.metaCoreUrl,
             serviceName: this.config.serviceName,
-            baseUrl: this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`,
+        // Browser-facing URL for the nav menu, in the order the spec requires:
+        // PUBLIC_URL (reachable when there is no Caddy perimeter in front — a
+        // debug-direct port) -> BASE_URL (the Caddy URL) -> container host.
+        // Announcing a Caddy URL on a stack with no Caddy running is what puts
+        // dead links in every neighbour's menu.
+            baseUrl: process.env.PUBLIC_URL || this.config.baseUrl || `http://${hostname()}:${this.config.apiPort}`,
         });
 
         // Watch for leader changes
@@ -313,10 +317,6 @@ export class KVManager {
     /**
      * Get service registration instance
      */
-    /** @deprecated File-based registration is gone; always null. */
-    getServiceRegistration(): null {
-        return null;
-    }
 
     /**
      * Check if the KV store is healthy

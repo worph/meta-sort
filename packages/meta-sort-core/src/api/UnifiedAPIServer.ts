@@ -237,7 +237,7 @@ export class UnifiedAPIServer {
       this.setupStatsRoutes();
     }
 
-    // Service discovery — proxies to meta-core's /api/services using the
+    // Service discovery — meta-discovery v1 neighbour list, served from the
     // LeaderClient to resolve meta-core's current URL dynamically.
     this.setupServiceDiscoveryRoutes();
 
@@ -592,33 +592,28 @@ export class UnifiedAPIServer {
   }
 
   /**
-   * Service discovery — proxies to meta-core's /api/services, resolving the
-   * current leader's URL via LeaderClient (no hardcoded hostname).
+   * Service discovery — meta-discovery v1. Served from this service's own UDP
+   * neighbour map; no meta-core round trip, so the nav survives a core outage.
    */
   private setupServiceDiscoveryRoutes(): void {
-    this.app.get('/api/services', async (_request, reply) => {
-      try {
-        const leaderClient = this.kvManager?.getLeaderClient();
-        if (!leaderClient) {
-          return reply.status(503).send({ error: 'KVManager not initialized' });
-        }
-        const apiUrl = await leaderClient.getApiUrl();
-        if (!apiUrl) {
-          return reply.status(503).send({ error: 'Leader not available yet' });
-        }
-        const response = await fetch(`${apiUrl}/api/services`, {
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!response.ok) {
-          return reply.status(response.status).send({
-            error: `Upstream ${apiUrl} returned ${response.status}`,
-          });
-        }
-        const body = await response.json();
-        return reply.send(body);
-      } catch (err) {
-        return reply.status(502).send({ error: getErrorMessage(err) });
+    // meta-discovery v1: neighbours heard over UDP, served from this service's
+    // own map. Unlike /api/services below it needs no meta-core, so the nav
+    // still renders when the core is down. `services` is kept as an alias
+    // while any older dashboard build is still in circulation.
+    this.app.get('/api/neighbors', async (_request, reply) => {
+      const leaderClient = this.kvManager?.getLeaderClient();
+      if (!leaderClient) {
+        return reply.send({ current: 'meta-sort', enabled: false, count: 0, neighbors: [] });
       }
+      const neighbors = leaderClient.getNeighbors();
+      return reply.send({
+        current: 'meta-sort',
+        enabled: true,
+        count: neighbors.length,
+        neighbors,
+        services: neighbors,
+        self: leaderClient.self(),
+      });
     });
   }
 

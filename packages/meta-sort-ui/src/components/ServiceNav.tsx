@@ -1,5 +1,8 @@
 import { useEffect } from 'react';
-import './meta-service-menu.js';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore -- plain ES module, no .d.ts; imported for its side effect
+// of defining the custom element.
+import '../meta-service-menu.js';
 
 /**
  * ServiceNav — the neighbouring meta-* services, as a burger menu.
