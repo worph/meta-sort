@@ -2,7 +2,7 @@
  * KV Manager - Unified manager for KV storage and service discovery
  *
  * This is the main entry point for the KV subsystem. It:
- * 1. Uses LeaderClient to locate meta-core over UDP (meta-discovery v1)
+ * 1. Uses LeaderClient to locate meta-core over UDP (beacon v2)
  * 2. Creates and manages the KV client (Redis)
  * 4. Manages reconnection on leader changes
  *

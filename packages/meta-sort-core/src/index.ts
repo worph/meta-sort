@@ -125,7 +125,7 @@ process.on('SIGINT', async () => {
 // Start initial discovery and processing (streaming pipeline)
 (async () => {
     try {
-        // meta-core is located over UDP (meta-discovery v1) — no /meta-core
+        // meta-core is located over UDP (beacon v2) — no /meta-core
         // volume required. META_CORE_URL, when set, pins it and discovery
         // never overrides; see docs/project-architecture/service-discovery.md.
         {

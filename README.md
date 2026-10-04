@@ -11,8 +11,8 @@ reads media exclusively over **meta-core's WebDAV** — it mounts neither
 > It does not run leader election, it does not spawn Redis, and it has
 > no direct Redis connection: every read and write goes through
 > **meta-core** (a separate Go service) over HTTP. meta-sort locates
-> meta-core over UDP multicast (**meta-discovery v1**,
-> `239.255.77.1:9399`) — meta-core's announce carries its API and WebDAV
+> meta-core over UDP multicast (**beacon v2**,
+> `239.255.99.1:9099`) — meta-core's announce carries its API and WebDAV
 > URLs — and announces itself on the same group so sibling dashboards can
 > list it. `META_CORE_URL` pins meta-core and disables wire selection.
 
@@ -61,13 +61,13 @@ Redis are **relative to `/files`**, which keeps storage portable across
 hosts. The only mounts are its own cache (`/data/cache`), the Docker
 socket (for plugin containers) and `plugins.yml`.
 
-### Locating meta-core (meta-discovery v1)
+### Locating meta-core (beacon v2)
 
 ```
 meta-core (separate container)
    ├── runs Redis, the file watcher, and the WebDAV server for /files
    ├── HTTP API: /urls, /api/events/files (SSE), /meta/*, ...
-   └── announces role=core on 239.255.77.1:9399 (UDP multicast),
+   └── advertises metamesh.core on 239.255.99.1:9099 (UDP multicast),
        carrying its /urls payload (apiUrl, webdavUrl, webdavUrlInternal)
                        │
                        ▼
@@ -85,7 +85,7 @@ meta-core (separate container)
 Source: `packages/meta-sort-core/src/discovery/meshdisco.ts`,
 `packages/meta-sort-core/src/kv/{KVManager,LeaderClient,RedisClient,MetaCoreApiWriter}.ts`,
 `packages/meta-sort-core/src/events/{FileEventConsumer,SSEEventClient}.ts`.
-The protocol spec is `docs/project-architecture/service-discovery.md` in
+The protocol spec is `docs/project-architecture/beacon-v2.md` in
 the meta-root. The `meshdisco.ts` port is mirrored across services and
 guarded by the meta-root's `scripts/check-mirrors.sh` — change it there in
 lockstep.
@@ -156,7 +156,7 @@ and [`docs/plugin-task-queue-architecture.md`](docs/plugin-task-queue-architectu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `META_CORE_URL` | — | Pins meta-core's API URL; UDP discovery then never overrides it. |
-| `ENABLE_UDP_DISCOVERY` | on | `false`/`0` disables the meta-discovery v1 announce/listen. |
+| `ENABLE_UDP_DISCOVERY` | on | `false`/`0` disables the beacon v2 announce/listen. |
 | `ALLOW_LEGACY_REDIS_URL` | — | `1` downgrades the "meta-core still publishes `redisUrl`" startup error to a warning. |
 | `FILES_PATH` | `/files` | Virtual root that relative paths resolve under (on meta-core's WebDAV). |
 | `CACHE_FOLDER_PATH` | `/data/cache` | Local cache root. |
@@ -182,8 +182,9 @@ Source of truth: `packages/meta-sort-core/src/config/EnvConfig.ts` (plus
 `PUBLIC_URL` in `kv/KVManager.ts` and `ENABLE_UDP_DISCOVERY` /
 `ALLOW_LEGACY_REDIS_URL` in `kv/LeaderClient.ts`). `META_CORE_PATH`,
 `REDIS_URL`, `ADVERTISE_HOST` and `SERVICE_VERSION` are still parsed by
-`EnvConfig.ts` but nothing acts on them any more. The discovery group is
-fixed at the protocol default (`239.255.77.1:9399`, 10 s interval).
+`EnvConfig.ts` but nothing acts on them any more. The discovery group
+defaults to the protocol endpoint (`239.255.99.1:9099`, 10 s interval);
+`BEACON_GROUP` / `BEACON_PORT` / `BEACON_INTERVAL_MS` override it.
 
 The WebDAV URLs are **not** configured via environment variables —
 meta-sort takes them from meta-core's announce (or `GET /urls` when
@@ -292,7 +293,7 @@ single host. They are only registered when the KV client is up.
 |----------|-------------|
 | `GET /api/metrics` | Performance metrics. |
 | `GET /api/stats` | File count + total size from meta-core's `/api/files/tuples` summary, cached stale-while-revalidate. |
-| `GET /api/neighbors` | meta-discovery v1 neighbour map (nav menu). Served locally — works while meta-core is down. Replaces the removed `/api/services`. |
+| `GET /api/neighbors` | beacon v2 neighbour map (nav menu). Served locally — works while meta-core is down. Replaces the removed `/api/services`. |
 
 ---
 
@@ -368,7 +369,7 @@ packages/meta-sort/
 │   │   │   ├── api/              # UnifiedAPIServer.ts (Fastify)
 │   │   │   ├── config/           # EnvConfig.ts, SupportedFileTypes.ts
 │   │   │   ├── container-plugins/# ContainerManager, ContainerPluginScheduler, ...
-│   │   │   ├── discovery/        # meshdisco.ts (meta-discovery v1, mirrored port)
+│   │   │   ├── discovery/        # meshdisco.ts (beacon v2, mirrored port)
 │   │   │   ├── events/           # FileEventConsumer, SSEEventClient
 │   │   │   ├── jellyfin/         # Jellyfin / NFO output helpers
 │   │   │   ├── kv/               # KVManager, LeaderClient, RedisClient, MetaCoreApiWriter
@@ -397,7 +398,7 @@ packages/meta-sort/
 | Component | File | Purpose |
 |-----------|------|---------|
 | Entry point | `src/index.ts` | Wires KVManager → API server → plugin manager → ContainerManager → StreamingPipeline → FileEventConsumer. |
-| Discovery | `src/discovery/meshdisco.ts` | meta-discovery v1 node + `MetaCoreLocator`. |
+| Discovery | `src/discovery/meshdisco.ts` | beacon v2 node + `MetaCoreLocator`. |
 | Streaming pipeline | `src/logic/pipeline/StreamingPipeline.ts` | 3-queue (validation / fast / background) orchestrator. |
 | State manager | `src/logic/UnifiedProcessingStateManager.ts` | Tracks `discovered → lightProcessing → hashProcessing → done`. |
 | File processor | `src/logic/WatchedFileProcessor.ts` | Light + hash phase implementation. |
@@ -428,7 +429,7 @@ Repo-level docs of interest:
   containers, and operational commands.
 - `/METADATA_KEYS.md` — schema for the `/file/{cid}` Redis hash.
 - `packages/meta-core/docs/` — Redis storage owner, api-mediated access.
-- `docs/project-architecture/service-discovery.md` — meta-discovery v1 spec.
+- `docs/project-architecture/beacon-v2.md` — beacon v2 spec.
 
 ## License
 

@@ -237,7 +237,7 @@ export class UnifiedAPIServer {
       this.setupStatsRoutes();
     }
 
-    // Service discovery — meta-discovery v1 neighbour list, served from the
+    // Service discovery — beacon v2 neighbour list, served from the
     // LeaderClient to resolve meta-core's current URL dynamically.
     this.setupServiceDiscoveryRoutes();
 
@@ -592,20 +592,23 @@ export class UnifiedAPIServer {
   }
 
   /**
-   * Service discovery — meta-discovery v1. Served from this service's own UDP
-   * neighbour map; no meta-core round trip, so the nav survives a core outage.
+   * Service discovery — beacon v2 (docs/project-architecture/beacon-v2.md).
+   * Served from this service's own beacon view; no meta-core round trip, so
+   * the nav survives a core outage.
    */
   private setupServiceDiscoveryRoutes(): void {
-    // meta-discovery v1: neighbours heard over UDP, served from this service's
-    // own map. Unlike /api/services below it needs no meta-core, so the nav
-    // still renders when the core is down. `services` is kept as an alias
+    // beacon v2: neighbours heard over UDP, served from this service's own
+    // view. Unlike /api/services below it needs no meta-core, so the nav still
+    // renders when the core is down. `?all=1` returns every instance,
+    // `?cap=<pattern>` filters by capability. `services` is kept as an alias
     // while any older dashboard build is still in circulation.
-    this.app.get('/api/neighbors', async (_request, reply) => {
+    this.app.get('/api/neighbors', async (request, reply) => {
       const leaderClient = this.kvManager?.getLeaderClient();
       if (!leaderClient) {
         return reply.send({ current: 'meta-sort', enabled: false, count: 0, neighbors: [] });
       }
-      const neighbors = leaderClient.getNeighbors();
+      const q = (request.query ?? {}) as { all?: string; cap?: string };
+      const neighbors = leaderClient.getNeighbors({ all: !!q.all, cap: q.cap || undefined });
       return reply.send({
         current: 'meta-sort',
         enabled: true,
