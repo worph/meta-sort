@@ -1247,6 +1247,9 @@ export class UnifiedAPIServer {
 
       try {
         await this.containerManager.removePlugin(pluginId);
+        // Drop it from the processing pipeline too (else it lingers in
+        // /api/plugins until the next rescan or restart).
+        await this.getPluginManager?.()?.loadContainerPlugins();
         return {
           success: true,
           message: `Plugin '${pluginId}' removed successfully`

@@ -468,6 +468,9 @@ export class ContainerManager extends EventEmitter {
                 // Scan shows it as bound elsewhere, never addable).
                 BEACON_ADVERTISE_URL: `http://${containerName}:8080`,
                 BEACON_BINDS: hostname(),
+                // Docker's own HOSTNAME is the container id; advertise a name
+                // an operator can read in the Scan card.
+                HOSTNAME: containerName,
             },
             // Docker Desktop grouping
             stackName: this.stackName,
