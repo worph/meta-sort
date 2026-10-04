@@ -1,7 +1,6 @@
 import {config} from "./config/EnvConfig.js";
 
 import os from 'os';
-import {existsSync} from 'fs';
 import {WatchedFileProcessor} from "./logic/WatchedFileProcessor.js";
 import {UnifiedAPIServer} from "./api/UnifiedAPIServer.js";
 import {StreamingPipeline} from "./logic/pipeline/StreamingPipeline.js";
@@ -168,8 +167,11 @@ process.on('SIGINT', async () => {
         const pluginManager = await initializePluginManager();
         console.log('[Startup] Plugin manager initialized');
 
-        // Initialize container plugins if config file exists
-        if (existsSync(config.CONTAINER_PLUGINS_CONFIG)) {
+        // Container plugins: the ones spawned from plugins.yml AND the external
+        // ones added by URL (beacon Scan card). Always initialised — with no
+        // plugins.yml and no Docker it still serves the external ones, and the
+        // Plugins page can add the first one.
+        {
             console.log('[Startup] Initializing container plugins...');
             try {
                 // Get webdavUrlInternal from meta-core via LeaderClient (for container-to-container access)
@@ -215,8 +217,6 @@ process.on('SIGINT', async () => {
                 console.error('[Startup] Failed to initialize container plugins:', error);
                 console.log('[Startup] Continuing without container plugins...');
             }
-        } else {
-            console.log(`[Startup] Container plugins config not found at ${config.CONTAINER_PLUGINS_CONFIG}, skipping`);
         }
 
         // Initialize hash index cache (loads existing hashes from disk)

@@ -5,6 +5,7 @@ import {
     PluginTimingsResponse
 } from '../types';
 import { formatMs, formatNumber } from '../utils/format';
+import BeaconScanCard from '../components/BeaconScanCard';
 
 interface AddPluginForm {
     pluginId: string;
@@ -33,6 +34,8 @@ function Plugins() {
         cpus: '0.5',
     });
     const [restartAllStatus, setRestartAllStatus] = useState<string | null>(null);
+    // Plugins meta-sort reaches by URL but did not spawn (added from the Scan card).
+    const [externalUrls, setExternalUrls] = useState<Record<string, string>>({});
 
     const fetchPlugins = useCallback(async () => {
         try {
@@ -41,6 +44,14 @@ function Plugins() {
                 const data = await res.json();
                 setPluginsData(data);
                 setError(null);
+                fetch('/api/plugins/containers')
+                    .then((r) => (r.ok ? r.json() : null))
+                    .then((c: { plugins?: Array<{ id: string; kind?: string; url?: string }> } | null) => {
+                        const map: Record<string, string> = {};
+                        for (const p of c?.plugins ?? []) if (p.kind === 'external' && p.url) map[p.id] = p.url;
+                        setExternalUrls(map);
+                    })
+                    .catch(() => {});
             } else if (res.status === 503) {
                 setError('Plugin manager not yet initialized. Process a file to initialize plugins.');
             }
@@ -370,6 +381,9 @@ function Plugins() {
                                             <div className="plugin-info">
                                                 <span className="plugin-name">{plugin.name}</span>
                                                 <span className="plugin-version">v{plugin.version}</span>
+                                                {externalUrls[plugin.id] && (
+                                                    <span className="plugin-external" title={`external: ${externalUrls[plugin.id]}`}>external</span>
+                                                )}
                                             </div>
                                             <label className="toggle" onClick={(e) => e.stopPropagation()}>
                                                 <input
@@ -677,6 +691,17 @@ function Plugins() {
                 </div>
             )}
 
+            {/* Beacon v2: plugins advertising on the network, with Scan + Add */}
+            <div className="card beacon-scan-card">
+                <h2>Discover plugins</h2>
+                <p className="card-description">
+                    Enrichment plugins installed as their own apps announce themselves on the network.
+                    Scan to list them; Add registers one as an external plugin (meta-sort calls it by URL
+                    and never starts or stops it). Remove it from the list like any other plugin.
+                </p>
+                <BeaconScanCard onAdded={fetchPlugins} />
+            </div>
+
             {/* Queue Assignment Section */}
             {pluginsData && pluginsData.activeCount > 0 && (
                 <div className="card queue-assignment-card">
@@ -920,6 +945,14 @@ function Plugins() {
                     overflow-y: auto;
                 }
 
+                .plugin-external {
+                    margin-left: 0.5rem;
+                    font-size: 0.7rem;
+                    padding: 0 0.4rem;
+                    border-radius: 3px;
+                    border: 1px dashed var(--accent-primary);
+                    color: var(--accent-primary);
+                }
                 .plugin-item {
                     background: var(--bg-tertiary);
                     border-radius: 8px;

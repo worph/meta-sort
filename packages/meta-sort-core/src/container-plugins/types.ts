@@ -164,7 +164,12 @@ export type ContainerInstanceStatus = 'starting' | 'healthy' | 'unhealthy' | 'st
 export interface ContainerPluginInstance {
     /** Plugin ID */
     pluginId: string;
-    /** Docker container ID */
+    /**
+     * `container` = spawned by meta-sort from plugins.yml; `external` = added by
+     * URL (beacon Scan card), not ours to start or stop. Absent = container.
+     */
+    kind?: 'container' | 'external';
+    /** Docker container ID ('' for an external plugin) */
     containerId: string;
     /** Container name (e.g., 'meta-plugin-ffmpeg-0') */
     containerName: string;
@@ -211,7 +216,9 @@ export interface PluginConfigureRequest {
  * Configure response from POST /configure
  */
 export interface PluginConfigureResponse {
-    success: boolean;
+    /** Older contract. The TS plugins answer `{ status: 'ok' }` instead. */
+    success?: boolean;
+    status?: string;
     error?: string;
 }
 
@@ -315,7 +322,11 @@ export interface ContainerManagerStatus {
     plugins: Array<{
         pluginId: string;
         enabled: boolean;
+        /** Docker image, or the plugin URL for an external plugin. */
         image: string;
+        kind: 'container' | 'external';
+        /** Base URL of the first instance. */
+        url?: string;
         instances: number;
         healthyInstances: number;
         manifest?: ContainerPluginManifest;

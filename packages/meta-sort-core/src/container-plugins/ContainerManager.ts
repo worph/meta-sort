@@ -25,6 +25,9 @@ import type {
     PluginConfigureResponse,
 } from './types.js';
 import { config } from '../config/EnvConfig.js';
+import { existsSync } from 'fs';
+import { hostname } from 'os';
+import { ExternalPluginStore, type ExternalPluginEntry } from './ExternalPluginStore.js';
 
 /**
  * Service info structure from meta-core service discovery
@@ -96,6 +99,11 @@ export class ContainerManager extends EventEmitter {
     private stackName?: string;
     private callbackUrl: string;
     private metaCoreUrl: string;
+    /** External plugins (added by URL); see ExternalPluginStore. */
+    private externalStore: ExternalPluginStore;
+    private externalEntries: ExternalPluginEntry[] = [];
+    /** False when Docker is unreachable: only external plugins run then. */
+    private dockerAvailable = false;
 
     constructor(
         private configPath: string = config.CONTAINER_PLUGINS_CONFIG,
@@ -116,6 +124,12 @@ export class ContainerManager extends EventEmitter {
 
         // Configure stack name for Docker Desktop grouping
         this.stackName = config.PLUGIN_STACK_NAME;
+        this.externalStore = new ExternalPluginStore(config.EXTERNAL_PLUGINS_PATH);
+    }
+
+    /** Swap the external-plugin store (tests). */
+    setExternalStore(store: ExternalPluginStore): void {
+        this.externalStore = store;
     }
 
     /**
@@ -183,22 +197,41 @@ export class ContainerManager extends EventEmitter {
             console.warn('  Plugins will not have access to files.');
         }
 
-        // Initialize Docker client
-        await this.dockerClient.initialize();
+        // Docker is needed only for the plugins we spawn. Without it (no
+        // socket, permission denied) external plugins still run.
+        try {
+            await this.dockerClient.initialize();
+            await this.dockerClient.ensureNetwork(this.network);
+            this.dockerAvailable = true;
+        } catch (error) {
+            console.warn('[ContainerManager] Docker unavailable — only external plugins will run:', error);
+        }
 
-        // Ensure network exists
-        await this.dockerClient.ensureNetwork(this.network);
-
-        // Load configuration
-        this.pluginsConfig = await loadConfig(this.configPath);
+        // Load configuration. A missing or broken plugins.yml means "no
+        // spawned plugins", not "no plugin manager": external plugins can
+        // still be added from the UI.
+        if (existsSync(this.configPath)) {
+            try {
+                this.pluginsConfig = await loadConfig(this.configPath);
+            } catch (error) {
+                console.error(`[ContainerManager] Ignoring ${this.configPath}:`, error);
+            }
+        } else {
+            console.log(`[ContainerManager] No ${this.configPath}; no spawned plugins`);
+        }
+        if (!this.pluginsConfig) {
+            this.pluginsConfig = { version: '1.0', plugins: {} };
+        }
 
         // Get enabled plugins
-        const enabledPlugins = getEnabledPlugins(this.pluginsConfig);
+        const enabledPlugins = this.dockerAvailable ? getEnabledPlugins(this.pluginsConfig) : [];
 
         console.log(`[ContainerManager] Found ${enabledPlugins.length} enabled plugins`);
 
-        // Clean up any stale containers from previous runs
-        await this.cleanupStaleContainers();
+        if (this.dockerAvailable) {
+            // Clean up any stale containers from previous runs
+            await this.cleanupStaleContainers();
+        }
 
         // Spawn containers for each enabled plugin
         for (const { id, config: pluginConfig } of enabledPlugins) {
@@ -212,6 +245,21 @@ export class ContainerManager extends EventEmitter {
                 });
             }
         }
+
+        // External plugins (added by URL). One unreachable at boot is
+        // registered anyway and picked up by the health loop when it appears.
+        this.externalEntries = await this.externalStore.load();
+        for (const entry of this.externalEntries.filter((e) => e.enabled)) {
+            if (this.instances.has(entry.pluginId)) {
+                console.warn(
+                    `[ContainerManager] External plugin '${entry.pluginId}' (${entry.url}) skipped: ` +
+                    'a spawned plugin already has that id'
+                );
+                continue;
+            }
+            this.attachExternal(entry);
+        }
+        console.log(`[ContainerManager] ${this.externalEntries.length} external plugin(s) configured`);
 
         this.initialized = true;
         this.emit('manager:initialized', { pluginCount: enabledPlugins.length });
@@ -415,6 +463,11 @@ export class ContainerManager extends EventEmitter {
                 CALLBACK_URL: this.callbackUrl,
                 WEBDAV_URL: this.webdavUrl || '',
                 FILES_PATH: '/files', // Virtual path - files accessed via WebDAV
+                // Beacon v2: advertise the URL we reach it on (so a Scan shows it
+                // as configured), and only to this meta-sort (another one's
+                // Scan shows it as bound elsewhere, never addable).
+                BEACON_ADVERTISE_URL: `http://${containerName}:8080`,
+                BEACON_BINDS: hostname(),
             },
             // Docker Desktop grouping
             stackName: this.stackName,
@@ -427,6 +480,7 @@ export class ContainerManager extends EventEmitter {
         // Create instance record
         const instance: ContainerPluginInstance = {
             pluginId,
+            kind: 'container',
             containerId,
             containerName,
             baseUrl: `http://${containerName}:8080`,
@@ -445,6 +499,12 @@ export class ContainerManager extends EventEmitter {
      * Stop a container instance
      */
     private async stopInstance(instance: ContainerPluginInstance): Promise<void> {
+        if (instance.kind === 'external') {
+            // Not ours to stop: just stop using it.
+            instance.status = 'stopped';
+            this.emit('plugin:stopped', { pluginId: instance.pluginId, instanceIndex: instance.instanceIndex });
+            return;
+        }
         console.log(`[ContainerManager] Stopping ${instance.containerName}...`);
 
         try {
@@ -490,6 +550,11 @@ export class ContainerManager extends EventEmitter {
                     if (healthy) {
                         instance.status = 'healthy';
                         instance.lastHealthCheck = Date.now();
+                        // An external plugin unreachable at boot has no manifest
+                        // yet; the scheduler needs one.
+                        if (!instance.manifest) {
+                            instance.manifest = await this.fetchManifest(instance).catch(() => undefined);
+                        }
 
                         if (previousStatus !== 'healthy') {
                             this.emit('plugin:healthy', { pluginId, instance });
@@ -609,9 +674,12 @@ export class ContainerManager extends EventEmitter {
             throw new Error(`Failed to configure plugin: ${response.status}`);
         }
 
+        // Two contracts in the wild: `{ success: true }` and the TS plugins'
+        // `{ status: 'ok' }`. Before both were accepted every configure of a
+        // TS plugin "failed" (silently, behind a try/warn).
         const data = (await response.json()) as PluginConfigureResponse;
-        if (!data.success) {
-            throw new Error(`Plugin configuration failed: ${data.error}`);
+        if (!data.success && data.status !== 'ok') {
+            throw new Error(`Plugin configuration failed: ${data.error ?? JSON.stringify(data)}`);
         }
     }
 
@@ -678,11 +746,14 @@ export class ContainerManager extends EventEmitter {
         for (const [pluginId, instances] of this.instances) {
             const pluginConfig = this.pluginsConfig?.plugins[pluginId];
             const healthyCount = instances.filter((i) => i.status === 'healthy').length;
+            const external = instances[0]?.kind === 'external';
 
             plugins.push({
                 pluginId,
                 enabled: pluginConfig?.enabled !== false,
-                image: pluginConfig?.image || 'unknown',
+                image: external ? instances[0].baseUrl : pluginConfig?.image || 'unknown',
+                kind: external ? 'external' : 'container',
+                url: instances[0]?.baseUrl,
                 instances: instances.length,
                 healthyInstances: healthyCount,
                 manifest: instances[0]?.manifest,
@@ -716,6 +787,16 @@ export class ContainerManager extends EventEmitter {
 
         const instances = this.instances.get(pluginId);
         const pluginConfig = this.pluginsConfig?.plugins[pluginId];
+
+        if (instances?.[0]?.kind === 'external') {
+            // Nothing to respawn: re-probe it and refresh its manifest.
+            for (const instance of instances) {
+                const healthy = await this.checkHealth(instance);
+                instance.status = healthy ? 'healthy' : 'unhealthy';
+                if (healthy) instance.manifest = await this.fetchManifest(instance).catch(() => instance.manifest);
+            }
+            return;
+        }
 
         if (!instances || !pluginConfig) {
             throw new Error(`Plugin '${pluginId}' not found`);
@@ -779,6 +860,93 @@ export class ContainerManager extends EventEmitter {
         }
     }
 
+    /** The external plugins, as persisted. */
+    getExternalPlugins(): ExternalPluginEntry[] {
+        return [...this.externalEntries];
+    }
+
+    /**
+     * Register an external plugin (one meta-sort did not spawn) by URL — what
+     * the beacon Scan card's Add does. Its manifest id becomes its plugin id,
+     * so it must be reachable now and its id must not clash with a loaded one.
+     */
+    async addExternalPlugin(rawUrl: string, name?: string): Promise<ExternalPluginEntry> {
+        const url = rawUrl.trim().replace(/\/+$/, '');
+        if (!/^https?:\/\//.test(url)) {
+            throw new Error('url must start with http:// or https://');
+        }
+        for (const list of this.instances.values()) {
+            const holder = list.find((i) => i.baseUrl.replace(/\/+$/, '') === url);
+            if (holder) throw new Error(`${url} is already registered as '${holder.pluginId}'`);
+        }
+        const probe: ContainerPluginInstance = {
+            pluginId: '?', kind: 'external', containerId: '', containerName: url, baseUrl: url,
+            instanceIndex: 0, status: 'starting', tasksProcessed: 0, tasksFailed: 0,
+        };
+        let manifest: ContainerPluginManifest;
+        try {
+            manifest = await this.fetchManifest(probe);
+        } catch (error) {
+            throw new Error(`could not read ${url}/manifest: ${error instanceof Error ? error.message : error}`);
+        }
+        const pluginId = manifest?.id;
+        if (!pluginId || !/^[a-z][a-z0-9-]*$/.test(pluginId)) {
+            throw new Error(`${url}/manifest has no usable plugin id`);
+        }
+        if (this.instances.has(pluginId)) {
+            throw new Error(`a plugin with id '${pluginId}' is already loaded`);
+        }
+        const entry: ExternalPluginEntry = {
+            pluginId, url, enabled: true, name: name?.trim() || undefined, addedAt: new Date().toISOString(),
+        };
+        this.externalEntries = [...this.externalEntries.filter((e) => e.pluginId !== pluginId), entry];
+        await this.externalStore.save(this.externalEntries);
+        this.attachExternal(entry, manifest);
+        console.log(`[ContainerManager] External plugin '${pluginId}' added (${url})`);
+        return entry;
+    }
+
+    /** Forget an external plugin. Throws if `pluginId` is not one. */
+    async removeExternalPlugin(pluginId: string): Promise<void> {
+        const known = this.externalEntries.some((e) => e.pluginId === pluginId);
+        const instances = this.instances.get(pluginId);
+        if (!known && !(instances?.[0]?.kind === 'external')) {
+            throw new Error(`'${pluginId}' is not an external plugin`);
+        }
+        if (instances?.[0]?.kind === 'external') {
+            const interval = this.healthCheckIntervals.get(pluginId);
+            if (interval) {
+                clearInterval(interval);
+                this.healthCheckIntervals.delete(pluginId);
+            }
+            for (const instance of instances) await this.stopInstance(instance);
+            this.instances.delete(pluginId);
+            this.roundRobinCounters.delete(pluginId);
+        }
+        this.externalEntries = this.externalEntries.filter((e) => e.pluginId !== pluginId);
+        await this.externalStore.save(this.externalEntries);
+        console.log(`[ContainerManager] External plugin '${pluginId}' removed`);
+    }
+
+    /** One instance pointing at `entry.url`, kept alive by the health loop. */
+    private attachExternal(entry: ExternalPluginEntry, manifest?: ContainerPluginManifest): void {
+        const instance: ContainerPluginInstance = {
+            pluginId: entry.pluginId,
+            kind: 'external',
+            containerId: '',
+            // The scheduler reports completions by this name; the URL is unique.
+            containerName: entry.url,
+            baseUrl: entry.url,
+            instanceIndex: 0,
+            status: 'starting',
+            manifest,
+            tasksProcessed: 0,
+            tasksFailed: 0,
+        };
+        this.instances.set(entry.pluginId, [instance]);
+        this.startHealthCheck(entry.pluginId);
+    }
+
     /**
      * Add a new plugin dynamically
      */
@@ -838,6 +1006,11 @@ export class ContainerManager extends EventEmitter {
         console.log(`[ContainerManager] Removing plugin '${pluginId}'...`);
 
         const instances = this.instances.get(pluginId);
+        // An external plugin is forgotten (and un-persisted), never stopped.
+        if (instances?.[0]?.kind === 'external' || this.externalEntries.some((e) => e.pluginId === pluginId)) {
+            await this.removeExternalPlugin(pluginId);
+            return;
+        }
 
         if (instances) {
             // Stop health check

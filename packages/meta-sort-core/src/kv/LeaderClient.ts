@@ -23,7 +23,7 @@
  * api-mediated-access lockdown; everything routes over HTTP.
  */
 
-import { MetaCoreLocator, type MeshNeighbor } from '../discovery/meshdisco.js';
+import { MetaCoreLocator, type MeshNeighbor, type ScanReport } from '../discovery/meshdisco.js';
 import type { LeaderLockInfo } from './IKVClient.js';
 
 export interface LeaderClientConfig {
@@ -271,6 +271,11 @@ export class LeaderClient {
     /** This service's own row, so the menu can show itself. */
     self(): MeshNeighbor {
         return this.locator.self();
+    }
+
+    /** Beacon v2 Scan card: probe, wait, classify `pattern` against `configured`. */
+    scan(pattern: string, configured: Array<[string, string]>, waitMs = 1500): Promise<ScanReport> {
+        return this.locator.scan(pattern, configured, waitMs);
     }
 
     close(): void {

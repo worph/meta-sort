@@ -220,6 +220,17 @@ export class PluginManager extends EventEmitter {
             return;
         }
 
+        // Forget container-backed plugins that are gone (an external plugin
+        // removed from the Plugins page); they have no local dir.
+        const present = new Set(status.plugins.map((p) => p.pluginId));
+        for (const [id, loaded] of this.loadedPlugins) {
+            if (loaded.pluginDir === '' && !present.has(id)) {
+                this.loadedPlugins.delete(id);
+                this.manifests.delete(id);
+                this.activePluginIds.delete(id);
+            }
+        }
+
         // Load state for plugin active status
         const state = await this.loadState();
 

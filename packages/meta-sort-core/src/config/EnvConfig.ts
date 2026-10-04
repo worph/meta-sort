@@ -89,6 +89,13 @@ interface EnvConfig {
     /** Path to container plugins config file (default: '/app/plugins.yml') */
     CONTAINER_PLUGINS_CONFIG: string;
 
+    /**
+     * External plugins added by URL from the Plugins page's beacon Scan card
+     * (default: '<CACHE_FOLDER_PATH>/state/external-plugins.json'). Kept apart
+     * from plugins.yml, which the store app mounts read-only.
+     */
+    EXTERNAL_PLUGINS_PATH: string;
+
     /** Docker socket path (default: '/var/run/docker.sock') */
     DOCKER_SOCKET_PATH: string;
 
@@ -156,6 +163,8 @@ export const config: EnvConfig = {
 
     // Container Plugins Configuration
     CONTAINER_PLUGINS_CONFIG: process.env.CONTAINER_PLUGINS_CONFIG || '/app/plugins.yml',
+    EXTERNAL_PLUGINS_PATH: process.env.EXTERNAL_PLUGINS_PATH
+        || `${process.env.CACHE_FOLDER_PATH || '/data/cache'}/state/external-plugins.json`,
     DOCKER_SOCKET_PATH: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock',
     CONTAINER_CALLBACK_URL: process.env.CONTAINER_CALLBACK_URL || 'http://meta-sort:8180',
     CONTAINER_META_CORE_URL: process.env.CONTAINER_META_CORE_URL || 'http://meta-sort',

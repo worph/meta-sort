@@ -1027,7 +1027,9 @@ export class UnifiedAPIServer {
             instanceCount: p.instances,
             healthyCount: p.healthyInstances,
             enabled: p.enabled,
-            image: p.image
+            image: p.image,
+            kind: p.kind,
+            url: p.url
           })),
           queue: queueStatus || null
         };
@@ -1037,6 +1039,67 @@ export class UnifiedAPIServer {
           error: 'Failed to get container plugin status',
           details: error.message
         });
+      }
+    });
+
+    // Beacon v2 Scan card: enrichment plugins advertising on the network
+    // (metamesh.enrich/<id>), classified against what this meta-sort runs.
+    this.app.post('/api/plugins/discover', async (_request, reply) => {
+      const leaderClient = this.kvManager?.getLeaderClient();
+      const empty = {
+        cap: 'metamesh.enrich/*', disabled: true,
+        summary: { nodes: 0, capable: 0, configured: 0, boundElsewhere: 0, addable: 0 },
+        candidates: [],
+      };
+      if (!leaderClient) return reply.send(empty);
+      const status = this.containerManager?.getStatus();
+      const configured: Array<[string, string]> = (status?.plugins ?? [])
+        .filter((p) => p.url)
+        .map((p) => [p.pluginId, p.url as string]);
+      const report = await leaderClient.scan('metamesh.enrich/*', configured, 1500);
+      // Same plugin id already loaded under another URL (e.g. our own spawned
+      // container of it): adding it would clash, so it counts as configured.
+      const loaded = new Set((status?.plugins ?? []).map((p) => p.pluginId));
+      for (const c of report.candidates) {
+        if (c.state !== 'addable') continue;
+        const id = c.caps.map((cap) => cap.match(/^metamesh\.enrich\/([^@]+)/)?.[1]).find((x) => x && loaded.has(x));
+        if (id) {
+          c.state = 'configured';
+          c.configuredAs = id;
+          report.summary.addable--;
+          report.summary.configured++;
+        }
+      }
+      return reply.send(report);
+    });
+
+    // External plugin (one meta-sort did not spawn) — the Scan card's Add.
+    this.app.post<{ Body: { url?: string; name?: string } }>('/api/plugins/external', async (request, reply) => {
+      if (!this.containerManager) {
+        return reply.status(503).send({ error: 'Container manager not initialized' });
+      }
+      const url = request.body?.url;
+      if (!url) return reply.status(400).send({ error: 'url is required' });
+      try {
+        const entry = await this.containerManager.addExternalPlugin(url, request.body?.name);
+        // Bring it into the processing pipeline (same as /api/plugins/rescan).
+        await this.getPluginManager?.()?.loadContainerPlugins();
+        return { success: true, plugin: entry };
+      } catch (error: any) {
+        return reply.status(400).send({ error: error.message });
+      }
+    });
+
+    this.app.delete<{ Params: { pluginId: string } }>('/api/plugins/external/:pluginId', async (request, reply) => {
+      if (!this.containerManager) {
+        return reply.status(503).send({ error: 'Container manager not initialized' });
+      }
+      try {
+        await this.containerManager.removeExternalPlugin(request.params.pluginId);
+        await this.getPluginManager?.()?.loadContainerPlugins();
+        return { success: true };
+      } catch (error: any) {
+        return reply.status(400).send({ error: error.message });
       }
     });
 
